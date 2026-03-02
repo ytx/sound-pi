@@ -1,0 +1,116 @@
+# Sound-Pi
+
+Raspberry Pi 4 + 3.5インチ SPI LCD (480x320) で動作するオーディオルーティングデバイス。
+PC/Mac からの USB Audio 入力と本機ブラウザ音声をミキシングし、最大4台の出力デバイス（USB/BT）へルーティングする。
+
+## 技術スタック
+
+- **Electron 28** + **React 18** + **Vite 5** + **TypeScript 5**
+- **TailwindCSS 3** — スタイリング
+- **Canvas API** — VUメーター / スペクトラムアナライザ描画
+- **electron-store** — 設定永続化
+- **PipeWire** — `wpctl` / `pw-cat` コマンド経由でオーディオ制御
+- **libgpiod** (`gpiomon`/`gpioget`) — ロータリーエンコーダ読み取り
+- **sysfs PWM** (`/sys/class/pwm/`) — LED PWM制御（dtoverlay=pwm,pin=13,func=4 が必要）
+- **bluetoothctl** — Bluetooth制御
+- **nmcli** — WiFi制御
+- **USB HID** — `/dev/hidg0` 経由でConsumer Control送信
+
+## ビルド・実行
+
+```bash
+npm run dev              # Vite dev server のみ
+npm run electron:dev     # Vite + Electron 同時起動（開発用）
+npm run build            # プロダクションビルド
+npm run package:linux-arm64  # ARM64パッケージング
+```
+
+## プロジェクト構成
+
+```
+sound-pi/
+├── package.json            # "type": "module" は使わない（Electron CJS互換）
+├── vite.config.ts          # base: './', @/ alias, __GIT_COMMIT__ define
+├── tsconfig.json           # Renderer用（ESNext, noEmit, bundler resolution）
+├── tsconfig.electron.json  # Main process用（CommonJS → dist-electron/）
+├── tsconfig.node.json      # Vite config用
+├── index.html              # lang="ja", CSP設定済み
+├── postcss.config.mjs      # ESMなので .mjs
+├── tailwind.config.mjs     # ESMなので .mjs
+├── electron/
+│   ├── main.ts             # メインプロセス（IPC登録、Window作成、マネージャ管理）
+│   ├── preload.ts          # contextBridge → window.soundPiAPI
+│   ├── git-version.ts      # ビルド時自動生成
+│   ├── audio/
+│   │   ├── pipewire-manager.ts  # wpctl ラッパー（デバイス一覧、音量、ミュート）
+│   │   └── audio-capture.ts     # pw-cat でPCMキャプチャ → FFT → renderer送信
+│   ├── usb-hid/
+│   │   └── hid-controller.ts    # /dev/hidg0 書き込み（Play/Pause, Next, Prev）
+│   ├── bluetooth/
+│   │   └── bluetooth-manager.ts # bluetoothctl ラッパー
+│   ├── network/
+│   │   └── wifi-manager.ts      # nmcli ラッパー
+│   ├── gpio/
+│   │   └── gpio-manager.ts      # gpiomon + sysfs PWM（CLK=19, DT=20, SW=26, LED=13）
+│   └── utils/
+│       └── logger.ts            # タグ付きロガー（メモリバッファ500件）
+└── src/
+    ├── main.tsx                 # React エントリ
+    ├── App.tsx                  # 画面ルーティング + ロータリー連動
+    ├── index.css                # Tailwind + 480x320固定、cursor:none
+    ├── types/
+    │   └── api.d.ts             # SoundPiAPI型定義 + Window拡張
+    ├── hooks/
+    │   ├── useAudioData.ts      # IPC audio:data 受信
+    │   ├── useRotaryEncoder.ts  # IPC rotary イベント受信
+    │   └── useVolume.ts         # 音量状態 + オーバーレイ表示管理
+    ├── components/
+    │   ├── Menu.tsx             # 3×2 タイルメニュー
+    │   ├── MenuTrigger.tsx      # 左上100x100 タップ領域
+    │   ├── VolumeOverlay.tsx    # 音量バー（2秒フェードアウト）
+    │   └── MuteOverlay.tsx      # ミュート表示
+    └── screens/
+        ├── VuMeter.tsx          # アナログ針VUメーター（Canvas）
+        ├── DualVuMeter.tsx      # L/R 2連VUメーター（Canvas）
+        ├── SpectrumAnalyzer.tsx # 32バンドFFTアナライザ（Canvas）
+        ├── InputMixer.tsx       # USB/Browser入力ミックス + 出力デバイス音量
+        ├── BluetoothSettings.tsx # BTスキャン・ペアリング・接続管理
+        └── WifiSettings.tsx     # WiFiスキャン・接続管理
+```
+
+## IPC設計
+
+チャネル名は `カテゴリ:アクション` 形式（例: `audio:set-master-volume`, `bt:scan`, `gpio:rotary-turn`）。
+
+- **invoke** (Promise) — `audio:*`, `bt:*`, `wifi:*`, `system:*`
+- **send** (fire-and-forget) — `hid:*`, `gpio:set-led-*`, `renderer-log`
+- **on** (main→renderer) — `audio:data`, `gpio:rotary-turn/press/long-press`, `bt:device-changed`, `wifi:status-changed`
+
+## 画面遷移
+
+```
+起動 → VuMeter（デフォルト）
+左上100x100タップ → Menu（3×2タイル） → 画面選択
+ロータリー回転 → VolumeOverlay（2秒後消える）
+ロータリー短押し → Play/Pause (USB HID)
+ロータリー長押し → Mute切替
+```
+
+## 重要な注意点
+
+- `package.json` に `"type": "module"` を入れてはいけない（Electron main processがCJS）
+- ESM形式のconfig（postcss, tailwind）は `.mjs` 拡張子を使う
+- 開発時は480x320ウィンドウ、本番はkioskモード全画面
+- GPIO非搭載環境（開発マシン）ではstubモードで動作
+- pigpio は Trixie で利用不可。libgpiod (gpiomon) + sysfs PWM を使う
+- LED hardware PWM には `dtoverlay=pwm,pin=13,func=4` が必要（sound-pi-gpio ansibleロール）
+
+## 参考にした既存コード
+
+| パターン | 参考元 |
+|---------|--------|
+| Electron基本構成 | `/home/pi/git/Sonix/sonix2/` |
+| BluetoothManager | `/home/pi/git/pi-obd2/electron/bluetooth/` |
+| WiFiManager | `/home/pi/git/pi-obd2/electron/network/` |
+| GpioManager | `/home/pi/git/pi-obd2/electron/gpio/` |
+| Logger | `/home/pi/git/pi-obd2/electron/logger.ts` |

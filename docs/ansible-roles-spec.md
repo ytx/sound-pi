@@ -280,7 +280,9 @@ systemd timer (30秒間隔)
 ### 4. spi-lcd
 
 SPI 接続 LCD ディスプレイ（ILI9486）と XPT2046 タッチコントローラーの設定。
-fbtft ドライバで `/dev/fb1` にフレームバッファを作成し、fbcp で `/dev/fb0` の内容をコピーする。
+Trixie の `piscreen` dtoverlay は DRM ドライバ (`ili9486`) として動作し、
+`/dev/dri/card1` に独立した DRM デバイスを作成する。
+fbcp は不要（DRM ドライバが直接 SPI LCD を駆動する）。
 
 **対応ハードウェア:**
 - 3.5インチ SPI LCD 480x320（ILI9486 ドライバ IC）
@@ -294,54 +296,80 @@ fbtft ドライバで `/dev/fb1` にフレームバッファを作成し、fbcp 
 | `spi_lcd_overlay` | `"piscreen"` | dtoverlay 名 |
 | `spi_lcd_width` | `480` | 画面幅 |
 | `spi_lcd_height` | `320` | 画面高さ |
-| `spi_lcd_rotate` | `270` | 回転角度（0/90/180/270） |
-| `spi_lcd_fps` | `30` | フレームレート |
+| `spi_lcd_rotate` | `0` | dtoverlay の rotate パラメータ |
 | `spi_lcd_speed` | `24000000` | SPI 速度 (Hz) |
 | `spi_lcd_touch_enabled` | `true` | タッチ有効化 |
 | `spi_lcd_touch_penirq` | `25` | タッチ割り込み GPIO ピン |
 | `spi_lcd_touch_speed` | `50000` | タッチ SPI 速度 |
 | `spi_lcd_touch_calibration_matrix` | `""` | キャリブレーションマトリクス |
-| `fbcp_enabled` | `true` | fbcp（フレームバッファコピー）有効化 |
 
 **処理内容:**
 1. SPI 有効化（config.txt に `dtparam=spi=on`）
-2. dtoverlay 設定（`piscreen` — ILI9486 + ads7846）
-   - config.txt に `dtoverlay=piscreen,speed=24000000,rotate=270`
-3. fbcp のインストール・設定
-   - `cmake`, `build-essential` のインストール
-   - fbcp-ili9341 のビルド（ILI9486 最適化オプション付き）
-   - または汎用 fbcp のビルド
-   - systemd service の配置（起動時に fbcp を実行）
-4. X11 の解像度設定
-   - `/dev/fb0` を 480x320 に設定（cmdline.txt の video パラメータ）
-5. タッチキャリブレーションツールのインストール（xlibinput_calibrator）
-6. タッチキャリブレーション udev ルールの配置
+2. dtoverlay 設定（`piscreen` — ILI9486 DRM ドライバ + ads7846）
+   - config.txt に `dtoverlay=piscreen,drm,speed=24000000,rotate=0`
+   - `drm` パラメータ付きで DRM モードで動作（fbtft ではなく）
+3. Xorg が SPI LCD を プライマリディスプレイとして使用する設定
+   - `/etc/X11/xorg.conf.d/10-spi-lcd.conf` の配置
+   - `/etc/X11/xorg.conf.d/99-v3d.conf` から `PrimaryGPU` を削除
+4. タッチキャリブレーションツールのインストール（xlibinput_calibrator）
+5. タッチキャリブレーション設定の配置
 
-**表示パイプライン:**
+**表示パイプライン（Trixie DRM 方式）:**
 ```
-X11 (Electron) → /dev/fb0 (480x320) → fbcp → /dev/fb1 (SPI LCD, fbtft)
+X11 (Electron) → modesetting drv → /dev/dri/card1 (ili9486 DRM) → SPI → LCD
 ```
 
-**fbcp の選択肢:**
+**DRM デバイス構成（Pi 4 + piscreen overlay）:**
+```
+/dev/dri/card0 — V3D (3Dアクセラレータ)
+/dev/dri/card1 — ili9486 (SPI LCD) ← Xorg はこれをプライマリにする
+/dev/dri/card2 — vc4-drm (HDMI)    ← PrimaryGPU を外す
+```
 
-| 方式 | 特徴 | FPS |
-|------|------|-----|
-| 汎用 fbcp | シンプル、fb0→fb1コピー | ~20fps |
-| fbcp-ili9341 | DMA最適化、差分転送 | ~30-60fps |
+**Xorg 設定テンプレート:**
 
-**テンプレート:**
-- `fbcp.service.j2` — fbcp systemd service
+`10-spi-lcd.conf.j2`:
+```
+Section "Device"
+  Identifier "SPI-LCD"
+  Driver "modesetting"
+  Option "kmsdev" "/dev/dri/card1"
+EndSection
+
+Section "Screen"
+  Identifier "SPI-Screen"
+  Device "SPI-LCD"
+  SubSection "Display"
+    Modes "{{ spi_lcd_width }}x{{ spi_lcd_height }}"
+  EndSubSection
+EndSection
+
+Section "ServerLayout"
+  Identifier "Default Layout"
+  Screen 0 "SPI-Screen"
+EndSection
+```
+
+`99-v3d.conf` (PrimaryGPU なし):
+```
+Section "OutputClass"
+  Identifier "vc4"
+  MatchDriver "vc4"
+  Driver "modesetting"
+EndSection
+```
 
 **lcd-touchscreen ロールとの違い:**
 - lcd-touchscreen: HDMI接続LCD + SPIタッチのみ
-- spi-lcd: SPI接続LCD（fbtft）+ SPIタッチ + fbcp
+- spi-lcd: SPI接続LCD（DRM ili9486）+ SPIタッチ
 
 **注意事項:**
-- SPI LCD は fbtft ドライバ経由で `/dev/fb1` として認識される
-- X11 は `/dev/fb0` を使用するため、fbcp で fb0→fb1 のコピーが必須
-- `piscreen` overlay は ILI9486 + ads7846 を同時に設定する
+- Trixie の `piscreen` overlay は DRM モードで動作し、fbtft/fbcp は不要
+- card 番号はデバイス検出順に依存する。安定性のため `/dev/dri/by-path/` の利用も検討
+- `DefaultDepth 16` を Xorg 設定に付けると `failed to add fb` エラーで起動しない → 付けない
 - SPI バスを LCD (spi0.0) とタッチ (spi0.1) で共有
 - 26ピンコネクタのため、GPIO 26 以降（ロータリーエンコーダ等）は空きピンとして使用可能
+- タッチコントローラーの penirq (GPIO25) が SPI CS1 と競合する場合がある（dmesg に警告が出る）
 
 ---
 
@@ -376,7 +404,6 @@ Sound-Pi 用 Electron アプリの kiosk モード設定。
 6. `.xinitrc` 配置（Electron kiosk 起動）
    - `--kiosk --no-sandbox --window-size=480,320`
    - 環境変数: `PIPEWIRE_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`
-7. cmdline.txt に video 設定追加
 
 **sonix-kiosk との違い:**
 - アプリ名・パスが異なる（sound-pi）
@@ -409,13 +436,14 @@ GPIO デバイスの設定。ロータリーエンコーダーと LED PWM の制
 | `gpio_user` | `"pi"` | GPIO アクセスユーザー |
 
 **処理内容:**
-1. GPIO 関連パッケージのインストール
-   - `python3-gpiozero`（検証用）
-   - `pigpio`（PWM制御用デーモン）
-2. pigpio デーモンの有効化（LED PWM 制御に使用）
-   - `pigpiod.service` 有効化
+1. GPIO 関連パッケージの確認（libgpiod は Trixie にプリインストール済み）
+   - `gpiod`（gpiomon, gpioset, gpioget）
+   - `python3-libgpiod`（検証用）
+2. hardware PWM dtoverlay の有効化（LED PWM 制御に使用）
+   - `/boot/firmware/config.txt` に `dtoverlay=pwm,pin=13,func=4` 追加
+   - GPIO13 を PWM1 チャネルとして sysfs (`/sys/class/pwm/pwmchip0/`) 経由で制御
 3. ユーザーを `gpio` グループに追加
-4. udev ルールの配置（GPIO デバイスのパーミッション設定）
+4. udev ルールの配置（GPIO / PWM デバイスのパーミッション設定）
 5. 電源供給ピン（Pin4: 5V, Pin6: GND）の文書化（ハードウェア配線のみ）
 
 **GPIO ピン配置:**
@@ -431,9 +459,9 @@ Pin 26 (GPIO26): ロータリーエンコーダー SW
 **注意事項:**
 - GPIO の実際の読み取り・制御は Electron アプリ（Node.js）側で実装
 - このロールはハードウェアアクセスに必要な権限と基盤ソフトウェアのみを設定
-- pigpiod は Node.js の `pigpio` パッケージから利用する
-- ロータリーエンコーダーは内部プルアップを使用（外付け抵抗不要）
-- LED PWM は pigpio のハードウェア PWM を使用（GPIO 13 は PWM1 対応）
+- ロータリーエンコーダーは libgpiod (`gpiomon`) で edge 検出、内部プルアップ使用（外付け抵抗不要）
+- LED PWM はカーネル sysfs hardware PWM を使用（GPIO13 = PWM1、dtoverlay で有効化）
+- pigpio は Trixie で利用不可のため使用しない
 
 ---
 

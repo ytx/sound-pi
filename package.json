@@ -1,0 +1,67 @@
+{
+  "name": "sound-pi",
+  "version": "1.0.0",
+  "description": "Sound-Pi Audio Routing Kiosk Application",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "generate:git": "node -e \"const h=require('child_process').execSync('git rev-parse --short HEAD').toString().trim();require('fs').writeFileSync('electron/git-version.ts','export const GIT_COMMIT = \\x27'+h+'\\x27;\\n')\"",
+    "build": "npm run generate:git && tsc && vite build && npm run build:electron",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "preview": "vite preview",
+    "electron": "npm run build:electron && electron .",
+    "electron:dev": "npm run generate:git && concurrently \"vite\" \"npm run build:electron && electron .\"",
+    "package": "npm run build && electron-builder",
+    "package:linux-arm64": "npm run build && electron-builder --linux --arm64"
+  },
+  "keywords": [
+    "sound-pi",
+    "electron",
+    "kiosk",
+    "audio",
+    "pipewire"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "electron-store": "^8.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.45",
+    "@types/react-dom": "^18.2.18",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.16",
+    "concurrently": "^8.2.2",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1",
+    "postcss": "^8.4.32",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.10"
+  },
+  "build": {
+    "appId": "com.soundpi.kiosk",
+    "productName": "Sound-Pi",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "linux": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "category": "Audio"
+    }
+  }
+}
