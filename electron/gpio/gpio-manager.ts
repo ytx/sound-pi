@@ -169,19 +169,29 @@ export class GpioManager {
     if (!fs.existsSync(channelPath)) {
       try {
         fs.writeFileSync(`${PWM_CHIP}/export`, PWM_CHANNEL);
-        // Wait briefly for sysfs to create the directory
-        for (let i = 0; i < 10; i++) {
-          if (fs.existsSync(channelPath)) break;
-          execSync('sleep 0.05', { stdio: 'pipe' });
-        }
       } catch (e) {
         logger.warn('gpio', `PWM export failed (dtoverlay=pwm may not be configured): ${e}`);
         return;
       }
     }
 
+    // Wait for sysfs + udev to set permissions (chgrp gpio)
+    const periodPath = `${channelPath}/period`;
+    for (let i = 0; i < 20; i++) {
+      try {
+        fs.accessSync(periodPath, fs.constants.W_OK);
+        break;
+      } catch {
+        if (i === 19) {
+          logger.warn('gpio', `PWM setup failed: ${periodPath} not writable after retries`);
+          return;
+        }
+        execSync('sleep 0.1', { stdio: 'pipe' });
+      }
+    }
+
     try {
-      fs.writeFileSync(`${channelPath}/period`, String(PWM_PERIOD_NS));
+      fs.writeFileSync(periodPath, String(PWM_PERIOD_NS));
       fs.writeFileSync(`${channelPath}/duty_cycle`, '0');
       fs.writeFileSync(`${channelPath}/enable`, '1');
       this.pwmExported = true;

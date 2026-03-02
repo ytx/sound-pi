@@ -98,12 +98,26 @@ sound-pi/
 
 ## 重要な注意点
 
+### ビルド・コード
 - `package.json` に `"type": "module"` を入れてはいけない（Electron main processがCJS）
 - ESM形式のconfig（postcss, tailwind）は `.mjs` 拡張子を使う
 - 開発時は480x320ウィンドウ、本番はkioskモード全画面
 - GPIO非搭載環境（開発マシン）ではstubモードで動作
 - pigpio は Trixie で利用不可。libgpiod (gpiomon) + sysfs PWM を使う
 - LED hardware PWM には `dtoverlay=pwm,pin=13,func=4` が必要（sound-pi-gpio ansibleロール）
+
+### SPI LCD + Xorg (spi-lcd ansible ロール)
+- card 番号は起動毎に変わる → `kmsdev` で `/dev/dri/by-path/platform-fe204000.spi-cs-0-card` を使用
+- `rp1-test.service` はマスクしない（99-v3d.conf に PrimaryGPU "true" を設定してくれる）
+- `PrimaryGPU "true"` は必須: logind が vc4 で DRM master を取り、SPI LCD の fd が空く
+- `xserver-xorg-legacy` をインストールすると X が root で動作し drmSetMaster が競合する → インストールしない
+- `DefaultDepth 16` を付けると `failed to add fb` エラー → 付けない
+- `hdmi_ignore_hotplug` で HDMI を無効化しないと vc4 が HDMI fb を作ろうとして起動が 3〜5 分遅延
+
+### Electron kiosk フラグ
+- 必須: `--kiosk --no-sandbox --disable-gpu --disable-gpu-compositing --ozone-platform=x11`
+- 禁止: `--disable-software-rasterizer`（白画面クラッシュ）
+- 禁止: `--in-process-gpu`（白画面クラッシュ）
 
 ## 参考にした既存コード
 
