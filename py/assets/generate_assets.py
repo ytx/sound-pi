@@ -350,6 +350,48 @@ def icon_wifi(d, S):
     d.ellipse([cx - 3, cy - 3, cx + 3, cy + 3], fill=(0, 200, 200))
 
 
+def icon_system(d, S):
+    """Gear icon."""
+    cx, cy = S // 2, S // 2
+    outer_r = 24
+    inner_r = 14
+    teeth = 8
+    # Draw gear teeth
+    for i in range(teeth):
+        a1 = math.radians(i * 360 / teeth - 12)
+        a2 = math.radians(i * 360 / teeth + 12)
+        # Outer tooth
+        pts = []
+        for a in (a1, a2):
+            pts.append((cx + int(math.cos(a) * outer_r),
+                        cy + int(math.sin(a) * outer_r)))
+        # Inner gap
+        a3 = math.radians(i * 360 / teeth + 360 / teeth / 2 - 8)
+        a4 = math.radians(i * 360 / teeth + 360 / teeth / 2 + 8)
+        for a in (a3, a4):
+            pts.append((cx + int(math.cos(a) * (inner_r + 4)),
+                        cy + int(math.sin(a) * (inner_r + 4))))
+    # Simpler approach: filled circle + teeth rectangles
+    d.ellipse([cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r],
+              fill=(140, 140, 140))
+    for i in range(teeth):
+        angle = math.radians(i * 360 / teeth)
+        tx = cx + int(math.cos(angle) * (inner_r + 2))
+        ty = cy + int(math.sin(angle) * (inner_r + 2))
+        d.rectangle([tx - 4, ty - 4, tx + 4, ty + 4], fill=(140, 140, 140))
+    # Center hole
+    d.ellipse([cx - 6, cy - 6, cx + 6, cy + 6], fill=(0, 0, 0, 0))
+    d.ellipse([cx - 7, cy - 7, cx + 7, cy + 7], outline=(100, 100, 100), width=2)
+
+
+def icon_develop(d, S):
+    """Wrench / terminal icon."""
+    cx, cy = S // 2, S // 2
+    # Terminal bracket: >_
+    d.line([(12, 18), (28, cy), (12, cy + 14)], fill=(0, 200, 200), width=3)
+    d.line([(30, cy + 14), (50, cy + 14)], fill=(0, 200, 200), width=3)
+
+
 # ============================================================
 # Spectrum bar gradient texture (single bar, 1x height)
 # ============================================================
@@ -389,5 +431,7 @@ if __name__ == "__main__":
     gen_menu_icon("mixer", icon_mixer)
     gen_menu_icon("bluetooth", icon_bluetooth)
     gen_menu_icon("wifi", icon_wifi)
+    gen_menu_icon("system", icon_system)
+    gen_menu_icon("develop", icon_develop)
 
     print(f"\nAll assets generated in {OUT}/")

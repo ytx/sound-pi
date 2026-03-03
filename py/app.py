@@ -23,13 +23,38 @@ from screens.spectrum import SpectrumScreen
 from screens.mixer import MixerScreen
 from screens.bluetooth_settings import BluetoothSettingsScreen
 from screens.wifi_settings import WifiSettingsScreen
-from ui.menu import Menu, MENU_TAP_REGION
+from screens.system import SystemScreen
+from screens.develop import DevelopScreen
+from ui.menu import Menu
 from ui.volume_overlay import VolumeOverlay, MuteOverlay
 
 log = get_logger("app")
 
 FPS = 30
 VOLUME_STEP = 5
+
+# Main menu: visualization screens (top-left tap)
+MAIN_MENU_ITEMS = [
+    ("VU Meter", "vu_meter", "icon_vu_meter.png"),
+    ("Dual VU", "dual_vu_meter", "icon_dual_vu_meter.png"),
+    ("Spectrum", "spectrum", "icon_spectrum.png"),
+    ("Mixer", "mixer", "icon_mixer.png"),
+    ("", None, ""),
+    ("", None, ""),
+]
+
+# Settings menu: system/config screens (top-right tap)
+SETTINGS_MENU_ITEMS = [
+    ("System", "system", "icon_system.png"),
+    ("Bluetooth", "bluetooth_settings", "icon_bluetooth.png"),
+    ("WiFi", "wifi_settings", "icon_wifi.png"),
+    ("", None, ""),
+    ("", None, ""),
+    ("Develop", "develop", "icon_develop.png"),
+]
+
+MAIN_MENU_REGION = pygame.Rect(0, 0, 100, 100)
+SETTINGS_MENU_REGION = pygame.Rect(380, 0, 100, 100)
 
 
 class App:
@@ -57,8 +82,11 @@ class App:
         if self._current_screen_id not in self._screens:
             self._current_screen_id = "vu_meter"
 
+        # Menus
+        self._main_menu = Menu(MAIN_MENU_ITEMS, MAIN_MENU_REGION)
+        self._settings_menu = Menu(SETTINGS_MENU_ITEMS, SETTINGS_MENU_REGION)
+
         # Overlays
-        self._menu = Menu()
         self._volume_overlay = VolumeOverlay()
         self._mute_overlay = MuteOverlay()
 
@@ -70,6 +98,8 @@ class App:
             MixerScreen(self._pipewire),
             BluetoothSettingsScreen(),
             WifiSettingsScreen(),
+            SystemScreen(),
+            DevelopScreen(self._audio_capture, self._gpio),
         ]
         for s in screens:
             self._screens[s.name] = s
@@ -132,19 +162,25 @@ class App:
                 screen.on_touch(x, y, event_type)
             return
 
-        # Menu handling
-        if self._menu.visible:
-            selected = self._menu.on_touch(x, y)
-            if selected:
-                self._switch_screen(selected)
-                self._menu.hide()
-            else:
-                self._menu.hide()
+        # Menu handling — if either menu is visible, handle its touch
+        for menu in (self._main_menu, self._settings_menu):
+            if menu.visible:
+                selected = menu.on_touch(x, y)
+                if selected:
+                    self._switch_screen(selected)
+                menu.hide()
+                return
+
+        # Top-left tap → main menu
+        if MAIN_MENU_REGION.collidepoint(x, y):
+            self._settings_menu.hide()
+            self._main_menu.show()
             return
 
-        # Top-left tap opens menu
-        if MENU_TAP_REGION.collidepoint(x, y):
-            self._menu.show()
+        # Top-right tap → settings menu
+        if SETTINGS_MENU_REGION.collidepoint(x, y):
+            self._main_menu.hide()
+            self._settings_menu.show()
             return
 
         # Forward to current screen
@@ -188,7 +224,8 @@ class App:
             screen.draw(surface)
 
         # Overlays (drawn on top)
-        self._menu.draw(surface, self._current_screen_id)
+        self._main_menu.draw(surface, self._current_screen_id)
+        self._settings_menu.draw(surface, self._current_screen_id)
         self._volume_overlay.draw(surface)
         self._mute_overlay.draw(surface)
 
