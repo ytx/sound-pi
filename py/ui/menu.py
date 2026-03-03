@@ -1,20 +1,21 @@
-"""3x2 tile menu overlay."""
+"""3x2 tile menu overlay with icons."""
 
 import pygame
 
+from ui.assets import load_image
 from ui.widgets import BLACK, WHITE, GRAY, CYAN, DARK_GRAY, draw_text
 
 # Menu region: top-left 100x100 tap opens menu
 MENU_TAP_REGION = pygame.Rect(0, 0, 100, 100)
 
-# Screen tiles
+# Screen tiles: (label, screen_id, icon_filename)
 MENU_ITEMS = [
-    ("VU Meter", "vu_meter"),
-    ("Dual VU", "dual_vu_meter"),
-    ("Spectrum", "spectrum"),
-    ("Mixer", "mixer"),
-    ("Bluetooth", "bluetooth_settings"),
-    ("WiFi", "wifi_settings"),
+    ("VU Meter", "vu_meter", "icon_vu_meter.png"),
+    ("Dual VU", "dual_vu_meter", "icon_dual_vu_meter.png"),
+    ("Spectrum", "spectrum", "icon_spectrum.png"),
+    ("Mixer", "mixer", "icon_mixer.png"),
+    ("Bluetooth", "bluetooth_settings", "icon_bluetooth.png"),
+    ("WiFi", "wifi_settings", "icon_wifi.png"),
 ]
 
 COLS, ROWS = 3, 2
@@ -28,7 +29,15 @@ class Menu:
 
     def __init__(self):
         self.visible = False
-        self._selected: str | None = None
+        self._icons: dict[str, pygame.Surface | None] = {}
+        self._icons_loaded = False
+
+    def _load_icons(self):
+        if self._icons_loaded:
+            return
+        for _, screen_id, icon_file in MENU_ITEMS:
+            self._icons[screen_id] = load_image(icon_file)
+        self._icons_loaded = True
 
     def toggle(self):
         self.visible = not self.visible
@@ -42,13 +51,14 @@ class Menu:
     def draw(self, surface: pygame.Surface, current_screen: str):
         if not self.visible:
             return
+        self._load_icons()
 
         # Dim background
         overlay = pygame.Surface((480, 320), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 180))
         surface.blit(overlay, (0, 0))
 
-        for i, (label, screen_id) in enumerate(MENU_ITEMS):
+        for i, (label, screen_id, _) in enumerate(MENU_ITEMS):
             col = i % COLS
             row = i // COLS
             x = MARGIN + col * (TILE_W + MARGIN)
@@ -59,15 +69,26 @@ class Menu:
             pygame.draw.rect(surface, bg_color, (x, y, TILE_W, TILE_H), border_radius=8)
             pygame.draw.rect(surface, WHITE if is_current else GRAY,
                              (x, y, TILE_W, TILE_H), 2, border_radius=8)
-            draw_text(surface, label, x + TILE_W // 2, y + TILE_H // 2,
-                      WHITE, 20, center=True)
+
+            # Icon
+            icon = self._icons.get(screen_id)
+            if icon:
+                iw, ih = icon.get_size()
+                icon_y = y + (TILE_H - ih - 20) // 2
+                surface.blit(icon, (x + (TILE_W - iw) // 2, icon_y))
+                # Label below icon
+                draw_text(surface, label, x + TILE_W // 2, icon_y + ih + 12,
+                          WHITE, 16, center=True)
+            else:
+                draw_text(surface, label, x + TILE_W // 2, y + TILE_H // 2,
+                          WHITE, 20, center=True)
 
     def on_touch(self, x: int, y: int) -> str | None:
         """Returns screen_id if a tile was tapped, else None."""
         if not self.visible:
             return None
 
-        for i, (label, screen_id) in enumerate(MENU_ITEMS):
+        for i, (label, screen_id, _) in enumerate(MENU_ITEMS):
             col = i % COLS
             row = i // COLS
             tx = MARGIN + col * (TILE_W + MARGIN)

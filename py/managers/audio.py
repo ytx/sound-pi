@@ -43,6 +43,47 @@ class AudioCapture:
 
         self._dummy = False
 
+    def _find_uac2_source(self) -> str | None:
+        """Find UAC2 Gadget capture source name via pw-cli."""
+        try:
+            out = subprocess.check_output(
+                ["pw-cli", "ls", "Node"], timeout=5, text=True, stderr=subprocess.DEVNULL,
+            )
+            # Parse pw-cli output into blocks separated by "id NNN" lines
+            # Find the block with node.nick containing "UAC2"
+            lines = out.splitlines()
+            block_lines: list[str] = []
+            found_name = None
+            for line in lines:
+                if line.strip().startswith("id "):
+                    # Process previous block
+                    found_name = self._check_uac2_block(block_lines)
+                    if found_name:
+                        return found_name
+                    block_lines = [line]
+                else:
+                    block_lines.append(line)
+            # Check last block
+            return self._check_uac2_block(block_lines)
+        except Exception as e:
+            log.debug("UAC2 source search failed: %s", e)
+        return None
+
+    def _check_uac2_block(self, lines: list[str]) -> str | None:
+        """Check if a pw-cli node block is the UAC2 capture source."""
+        has_uac2 = False
+        node_name = None
+        for line in lines:
+            stripped = line.strip()
+            if "node.nick" in stripped and "UAC2" in stripped:
+                has_uac2 = True
+            if "node.name" in stripped and "=" in stripped:
+                node_name = stripped.split("=", 1)[1].strip().strip('"')
+        if has_uac2 and node_name:
+            log.info("found UAC2 source: %s", node_name)
+            return node_name
+        return None
+
     def start(self):
         """Start capturing audio."""
         if self._running:
@@ -50,19 +91,30 @@ class AudioCapture:
         self._running = True
 
         try:
+            cmd = [
+                "pw-cat", "--record", "--format", "s16",
+                "--rate", str(SAMPLE_RATE),
+                "--channels", str(CHANNELS),
+            ]
+            # Try to target UAC2 Gadget source (retry — PipeWire may still be starting)
+            uac2 = None
+            for attempt in range(5):
+                uac2 = self._find_uac2_source()
+                if uac2:
+                    break
+                log.debug("UAC2 not found yet, retry %d/5", attempt + 1)
+                import time
+                time.sleep(2)
+            if uac2:
+                cmd += ["--target", uac2]
+            cmd.append("-")
+
             self._proc = subprocess.Popen(
-                [
-                    "pw-cat", "--record", "--format", "s16",
-                    "--rate", str(SAMPLE_RATE),
-                    "--channels", str(CHANNELS),
-                    "-",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             )
             self._thread = threading.Thread(target=self._read_loop, daemon=True)
             self._thread.start()
-            log.info("pw-cat capture started")
+            log.info("pw-cat capture started (target=%s)", uac2 or "default")
         except FileNotFoundError:
             log.warning("pw-cat not found — using dummy data")
             self._dummy = True

@@ -1,18 +1,19 @@
-"""Dual L/R VU meter screen."""
+"""Dual L/R VU meter screen — image-based rendering."""
 
 import math
 import pygame
 
 from screens.base import Screen
-from ui.widgets import BLACK, WHITE, GRAY, GREEN, YELLOW, RED, draw_text
+from ui.assets import load_image
+from ui.widgets import BLACK, WHITE, GRAY, RED, draw_text
 
-# Meter geometry — two smaller meters side by side
-LEFT_CX, LEFT_CY = 130, 260
-RIGHT_CX, RIGHT_CY = 350, 260
-RADIUS = 150
-NEEDLE_LEN = 135
-ARC_START = math.radians(220)
-ARC_END = math.radians(320)
+# Meter positions
+LEFT_CX, LEFT_CY = 120, 230
+RIGHT_CX, RIGHT_CY = 360, 230
+
+ARC_START_DEG = 140
+ARC_END_DEG = 40
+SWEEP = ARC_START_DEG - ARC_END_DEG
 
 ATTACK = 0.3
 RELEASE = 0.08
@@ -25,7 +26,7 @@ class _MeterState:
         self.peak = 0.0
 
     def update(self, target: float):
-        target = min(1.0, target * 2.5)
+        target = min(1.0, target * 30.0)
         if target > self.needle:
             self.needle += (target - self.needle) * ATTACK
         else:
@@ -43,6 +44,16 @@ class DualVuMeterScreen(Screen):
         self._audio = audio_capture
         self._left = _MeterState()
         self._right = _MeterState()
+        self._bg: pygame.Surface | None = None
+        self._needle_img: pygame.Surface | None = None
+        self._loaded = False
+
+    def _load_assets(self):
+        if self._loaded:
+            return
+        self._bg = load_image("dual_vu_bg.png")
+        self._needle_img = load_image("dual_vu_needle.png")
+        self._loaded = True
 
     def update(self, dt: float):
         data = self._audio.get_data()
@@ -50,51 +61,46 @@ class DualVuMeterScreen(Screen):
         self._right.update(data["level_r"])
 
     def draw(self, surface: pygame.Surface):
+        self._load_assets()
         surface.fill(BLACK)
+
+        draw_text(surface, "DUAL VU", 240, 12, WHITE, 24, center=True)
 
         self._draw_meter(surface, LEFT_CX, LEFT_CY, self._left, "L")
         self._draw_meter(surface, RIGHT_CX, RIGHT_CY, self._right, "R")
 
-        draw_text(surface, "DUAL VU", 240, 15, WHITE, 24, center=True)
-
     def _draw_meter(self, surface: pygame.Surface, cx: int, cy: int,
                     state: _MeterState, label: str):
-        # Arc
-        segments = 40
-        for i in range(segments):
-            frac = i / segments
-            angle = ARC_START + (ARC_END - ARC_START) * frac
-            next_angle = ARC_START + (ARC_END - ARC_START) * (i + 1) / segments
-            color = GREEN if frac < 0.6 else (YELLOW if frac < 0.85 else RED)
-            x1 = cx + int(math.cos(angle) * (RADIUS - 10))
-            y1 = cy - int(math.sin(angle) * (RADIUS - 10))
-            x2 = cx + int(math.cos(next_angle) * (RADIUS - 10))
-            y2 = cy - int(math.sin(next_angle) * (RADIUS - 10))
-            pygame.draw.line(surface, color, (x1, y1), (x2, y2), 3)
+        # Background image
+        if self._bg:
+            bw, bh = self._bg.get_size()
+            surface.blit(self._bg, (cx - bw // 2, cy - bh + 25))
 
-        # Scale marks
-        for frac in (0.0, 0.2, 0.4, 0.6, 0.75, 0.85, 1.0):
-            angle = ARC_START + (ARC_END - ARC_START) * frac
-            xi = cx + int(math.cos(angle) * (RADIUS - 22))
-            yi = cy - int(math.sin(angle) * (RADIUS - 22))
-            xo = cx + int(math.cos(angle) * (RADIUS - 5))
-            yo = cy - int(math.sin(angle) * (RADIUS - 5))
-            pygame.draw.line(surface, WHITE, (xi, yi), (xo, yo), 1)
-
-        # Peak needle
-        pa = ARC_START + (ARC_END - ARC_START) * state.peak
-        px = cx + int(math.cos(pa) * NEEDLE_LEN)
-        py = cy - int(math.sin(pa) * NEEDLE_LEN)
-        pygame.draw.line(surface, RED, (cx, cy), (px, py), 1)
+        # Peak needle (line)
+        self._draw_needle_line(surface, cx, cy, state.peak, RED, 1)
 
         # Main needle
-        na = ARC_START + (ARC_END - ARC_START) * state.needle
-        nx = cx + int(math.cos(na) * NEEDLE_LEN)
-        ny = cy - int(math.sin(na) * NEEDLE_LEN)
-        pygame.draw.line(surface, WHITE, (cx, cy), (nx, ny), 2)
-
-        # Pivot
-        pygame.draw.circle(surface, GRAY, (cx, cy), 6)
+        if self._needle_img:
+            angle_deg = ARC_START_DEG - state.needle * SWEEP
+            rotation = angle_deg - 90
+            rotated = pygame.transform.rotate(self._needle_img, rotation)
+            angle_rad = math.radians(angle_deg)
+            half_h = self._needle_img.get_height() / 2
+            img_cx = cx + math.cos(angle_rad) * half_h
+            img_cy = cy - math.sin(angle_rad) * half_h
+            rect = rotated.get_rect(center=(int(img_cx), int(img_cy)))
+            surface.blit(rotated, rect)
+        else:
+            self._draw_needle_line(surface, cx, cy, state.needle, WHITE, 2)
 
         # Label
-        draw_text(surface, label, cx, cy - RADIUS - 5, WHITE, 18, center=True)
+        draw_text(surface, label, cx, cy - 160, WHITE, 18, center=True)
+
+    def _draw_needle_line(self, surface: pygame.Surface, cx: int, cy: int,
+                          pos: float, color: tuple, width: int):
+        angle_deg = ARC_START_DEG - pos * SWEEP
+        angle_rad = math.radians(angle_deg)
+        length = 130
+        x = cx + int(math.cos(angle_rad) * length)
+        y = cy - int(math.sin(angle_rad) * length)
+        pygame.draw.line(surface, color, (cx, cy), (x, y), width)
