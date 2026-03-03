@@ -32,12 +32,6 @@ class DevelopScreen(Screen):
         # Sound test state
         self._sound_proc: subprocess.Popen | None = None
 
-        # GPIO pin readings
-        self._clk_val: int | None = None
-        self._dt_val: int | None = None
-        self._sw_val: int | None = None
-        self._gpio_timer = 0.0
-
         # Status message
         self._status = ""
 
@@ -48,17 +42,9 @@ class DevelopScreen(Screen):
 
     def on_enter(self):
         self._status = ""
-        self._read_gpio_pins()
 
     def on_exit(self):
         self._stop_all()
-
-    def _read_gpio_pins(self):
-        if self._gpio._stub:
-            return
-        self._clk_val = self._gpio._read_pin(CLK_PIN)
-        self._dt_val = self._gpio._read_pin(DT_PIN)
-        self._sw_val = self._gpio._read_pin(SW_PIN)
 
     def _start_led_test(self):
         if self._led_testing:
@@ -109,11 +95,6 @@ class DevelopScreen(Screen):
         self._status = "Stopped"
 
     def update(self, dt: float):
-        self._gpio_timer += dt
-        if self._gpio_timer >= 0.5:
-            self._gpio_timer = 0.0
-            self._read_gpio_pins()
-
         # Check if sound finished
         if self._sound_proc and self._sound_proc.poll() is not None:
             self._sound_proc = None
@@ -131,9 +112,10 @@ class DevelopScreen(Screen):
         # GPIO section
         draw_text(surface, "GPIO Pins", 20, y, CYAN, 16)
         y += 24
-        pin_str = (f"CLK({CLK_PIN})={self._fmt_pin(self._clk_val)}  "
-                   f"DT({DT_PIN})={self._fmt_pin(self._dt_val)}  "
-                   f"SW({SW_PIN})={self._fmt_pin(self._sw_val)}")
+        ps = self._gpio.pin_states
+        pin_str = (f"CLK({CLK_PIN})={self._fmt_pin(ps.get(CLK_PIN))}  "
+                   f"DT({DT_PIN})={self._fmt_pin(ps.get(DT_PIN))}  "
+                   f"SW({SW_PIN})={self._fmt_pin(ps.get(SW_PIN))}")
         draw_text(surface, pin_str, 20, y, WHITE, 14)
         y += 24
 

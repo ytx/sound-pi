@@ -1,4 +1,7 @@
-"""GPIO manager: rotary encoder via gpiomon, LED via sysfs PWM."""
+"""GPIO manager: rotary encoder via gpiomon, LED via sysfs PWM.
+
+Uses libgpiod v2 CLI (gpioget/gpiomon with -c/--chip, -e/--edges).
+"""
 
 import os
 import subprocess
@@ -17,7 +20,7 @@ SW_PIN = 26
 
 # sysfs PWM for LED
 PWM_CHIP = Path("/sys/class/pwm/pwmchip0")
-PWM_CHANNEL = PWM_CHIP / "pwm0"
+PWM_CHANNEL = PWM_CHIP / "pwm1"  # pin13 = PWM0_1 → channel 1
 PWM_PERIOD_NS = 1_000_000  # 1ms = 1kHz
 
 # Events
@@ -43,6 +46,11 @@ class GpioManager:
         self._pwm_enabled = False
         self._stub = False
 
+        # Last known pin states (tracked from gpiomon events)
+        self.pin_states: dict[int, int | None] = {
+            CLK_PIN: None, DT_PIN: None, SW_PIN: None,
+        }
+
     def start(self):
         self._running = True
         if not self._detect_gpio():
@@ -62,12 +70,13 @@ class GpioManager:
             return False
 
     def _start_encoder(self):
-        """Monitor rotary encoder CLK+DT with gpiomon."""
+        """Monitor rotary encoder CLK+DT with gpiomon (libgpiod v2)."""
         try:
             self._encoder_proc = subprocess.Popen(
                 [
-                    "gpiomon", "--chip", "gpiochip0",
-                    "--falling-edge", "--rising-edge",
+                    "gpiomon", "-c", "gpiochip0",
+                    "-e", "both", "-b", "pull-up",
+                    "--format", "%o %e",
                     str(CLK_PIN), str(DT_PIN),
                 ],
                 stdout=subprocess.PIPE,
@@ -81,36 +90,41 @@ class GpioManager:
             log.warning("encoder start failed: %s", e)
 
     def _encoder_loop(self):
-        last_clk = None
+        """Parse gpiomon v2 output: '<offset> <edge_type>'
+        edge_type: 1=rising, 2=falling
+        """
         while self._running and self._encoder_proc:
             line = self._encoder_proc.stdout.readline()
             if not line:
                 break
-            # gpiomon output: "EVENT offset TIMESTAMP edge"
             parts = line.strip().split()
-            if len(parts) < 3:
+            if len(parts) < 2:
                 continue
             try:
-                offset = int(parts[1])
-                edge = parts[-1]  # "RISING" or "FALLING"
+                offset = int(parts[0])
+                edge = int(parts[1])
             except (ValueError, IndexError):
                 continue
 
-            if offset == CLK_PIN and edge == "FALLING":
-                # Read DT state
-                dt_val = self._read_pin(DT_PIN)
+            # Track pin state: rising=1, falling=0
+            pin_val = 1 if edge == 1 else 0
+            self.pin_states[offset] = pin_val
+
+            if offset == CLK_PIN and edge == 2:  # falling
+                dt_val = self.pin_states.get(DT_PIN)
                 if dt_val is not None:
                     evt = EVT_ROTATE_CW if dt_val == 1 else EVT_ROTATE_CCW
                     with self._lock:
                         self._events.append(evt)
 
     def _start_button(self):
-        """Monitor rotary encoder switch."""
+        """Monitor rotary encoder switch (libgpiod v2)."""
         try:
             self._button_proc = subprocess.Popen(
                 [
-                    "gpiomon", "--chip", "gpiochip0",
-                    "--falling-edge", "--rising-edge",
+                    "gpiomon", "-c", "gpiochip0",
+                    "-e", "both", "-b", "pull-up",
+                    "--format", "%o %e",
                     str(SW_PIN),
                 ],
                 stdout=subprocess.PIPE,
@@ -124,18 +138,27 @@ class GpioManager:
             log.warning("button start failed: %s", e)
 
     def _button_loop(self):
+        """Parse gpiomon v2 output for button press/release.
+        edge_type: 1=rising, 2=falling
+        """
         press_time = None
         while self._running and self._button_proc:
             line = self._button_proc.stdout.readline()
             if not line:
                 break
             parts = line.strip().split()
-            if len(parts) < 3:
+            if len(parts) < 2:
                 continue
-            edge = parts[-1]
-            if edge == "FALLING":
+            try:
+                edge = int(parts[1])
+            except (ValueError, IndexError):
+                continue
+            # Track pin state
+            self.pin_states[SW_PIN] = 1 if edge == 1 else 0
+
+            if edge == 2:  # falling = press
                 press_time = time.monotonic()
-            elif edge == "RISING" and press_time is not None:
+            elif edge == 1 and press_time is not None:  # rising = release
                 duration_ms = (time.monotonic() - press_time) * 1000
                 evt = EVT_BUTTON_LONG if duration_ms >= LONG_PRESS_MS else EVT_BUTTON_SHORT
                 with self._lock:
@@ -143,12 +166,16 @@ class GpioManager:
                 press_time = None
 
     def _read_pin(self, pin: int) -> int | None:
+        """Read GPIO pin value using gpioget v2.
+        Output format: '"<pin>"=active' or '"<pin>"=inactive'
+        """
         try:
             out = subprocess.check_output(
-                ["gpioget", "gpiochip0", str(pin)],
+                ["gpioget", "-c", "gpiochip0", "-b", "pull-up", str(pin)],
                 timeout=1, text=True,
             )
-            return int(out.strip())
+            # Parse v2 output: "19"=active → 1, "19"=inactive → 0
+            return 0 if "inactive" in out else 1
         except Exception:
             return None
 
@@ -157,19 +184,32 @@ class GpioManager:
         try:
             export = PWM_CHIP / "export"
             if not PWM_CHANNEL.exists() and export.exists():
-                export.write_text("0")
-                # Wait for udev
+                export.write_text("1")
+                # Wait for udev to create the directory
                 for _ in range(10):
                     if PWM_CHANNEL.exists():
                         break
                     time.sleep(0.1)
 
-            if PWM_CHANNEL.exists():
-                (PWM_CHANNEL / "period").write_text(str(PWM_PERIOD_NS))
-                (PWM_CHANNEL / "duty_cycle").write_text("0")
-                (PWM_CHANNEL / "enable").write_text("1")
-                self._pwm_enabled = True
-                log.info("PWM enabled")
+            if not PWM_CHANNEL.exists():
+                log.warning("PWM channel not found")
+                return
+
+            # Wait for udev to set permissions (root:gpio)
+            period_path = PWM_CHANNEL / "period"
+            for _ in range(20):
+                if os.access(period_path, os.W_OK):
+                    break
+                time.sleep(0.1)
+            else:
+                log.warning("PWM permission timeout")
+                return
+
+            period_path.write_text(str(PWM_PERIOD_NS))
+            (PWM_CHANNEL / "duty_cycle").write_text("0")
+            (PWM_CHANNEL / "enable").write_text("1")
+            self._pwm_enabled = True
+            log.info("PWM enabled")
         except Exception as e:
             log.warning("PWM setup failed: %s", e)
 
