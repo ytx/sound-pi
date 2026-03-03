@@ -14,16 +14,11 @@ from logger import get_logger
 
 log = get_logger("system")
 
-def _find_repo_dir():
-    """Find git repo root from __file__ or fall back to known path."""
-    d = os.path.dirname(os.path.abspath(__file__))
-    for _ in range(5):
-        if os.path.isdir(os.path.join(d, ".git")):
-            return d
-        d = os.path.dirname(d)
-    return os.path.expanduser("~/git/sound-pi")
+def _find_app_dir():
+    """Find the application root directory (parent of screens/)."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-REPO_DIR = _find_repo_dir()
+APP_DIR = _find_app_dir()
 
 CONFIRM_TIMEOUT = 2.0  # seconds to confirm reboot/shutdown
 
@@ -60,14 +55,23 @@ class SystemScreen(Screen):
         self._refresh_info()
 
     def _refresh_info(self):
-        # Git branch
-        try:
-            result = subprocess.run(
-                ["git", "-C", REPO_DIR, "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=2)
-            self._git_branch = result.stdout.strip() if result.returncode == 0 else "?"
-        except Exception:
-            self._git_branch = "?"
+        # Git branch: try VERSION file first, then git command
+        self._git_branch = "?"
+        version_file = os.path.join(APP_DIR, "VERSION")
+        if os.path.exists(version_file):
+            try:
+                self._git_branch = open(version_file).read().strip()
+            except Exception:
+                pass
+        if self._git_branch == "?":
+            try:
+                result = subprocess.run(
+                    ["git", "-C", APP_DIR, "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, timeout=2)
+                if result.returncode == 0:
+                    self._git_branch = result.stdout.strip()
+            except Exception:
+                pass
 
         # Memory from /proc/meminfo
         try:
