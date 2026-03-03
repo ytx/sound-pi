@@ -4,3 +4,7 @@ dist-electron/
 release/
 *.log
 git-version.ts
+venv/
+work/
+__pycache__/
+*.pyc
