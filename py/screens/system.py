@@ -14,7 +14,16 @@ from logger import get_logger
 
 log = get_logger("system")
 
-REPO_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+def _find_repo_dir():
+    """Find git repo root from __file__ or fall back to known path."""
+    d = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(5):
+        if os.path.isdir(os.path.join(d, ".git")):
+            return d
+        d = os.path.dirname(d)
+    return os.path.expanduser("~/git/sound-pi")
+
+REPO_DIR = _find_repo_dir()
 
 CONFIRM_TIMEOUT = 2.0  # seconds to confirm reboot/shutdown
 

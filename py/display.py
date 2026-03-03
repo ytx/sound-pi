@@ -79,29 +79,45 @@ class Display:
 
     def _hide_vt_cursor(self):
         """Disable the VT console cursor so it doesn't blink over the framebuffer."""
-        # Method 1: ANSI escape to hide cursor on current tty
+        import subprocess
+        # setterm to hide cursor on tty1
         try:
-            with open("/dev/tty0", "w") as tty:
-                tty.write("\033[?25l")  # hide cursor
-                tty.write("\033[2J")    # clear screen
+            subprocess.run(
+                ["sudo", "setterm", "--cursor", "off", "--term", "linux"],
+                stdin=open("/dev/tty1"), stdout=open("/dev/tty1", "w"),
+                timeout=2)
         except Exception:
             pass
-        # Method 2: Disable fbcon cursor blink globally
+        # Disable fbcon cursor blink (requires root)
         try:
-            Path("/sys/class/graphics/fbcon/cursor_blink").write_text("0")
+            subprocess.run(
+                ["sudo", "sh", "-c", "echo 0 > /sys/class/graphics/fbcon/cursor_blink"],
+                timeout=2)
+        except Exception:
+            pass
+        # Clear tty1 screen
+        try:
+            subprocess.run(
+                ["sudo", "sh", "-c", "echo -ne '\\033[2J' > /dev/tty1"],
+                timeout=2)
         except Exception:
             pass
         log.info("VT cursor hidden")
 
     def _restore_vt_cursor(self):
         """Re-enable the VT console cursor."""
+        import subprocess
         try:
-            with open("/dev/tty0", "w") as tty:
-                tty.write("\033[?25h")
+            subprocess.run(
+                ["sudo", "setterm", "--cursor", "on", "--term", "linux"],
+                stdin=open("/dev/tty1"), stdout=open("/dev/tty1", "w"),
+                timeout=2)
         except Exception:
             pass
         try:
-            Path("/sys/class/graphics/fbcon/cursor_blink").write_text("1")
+            subprocess.run(
+                ["sudo", "sh", "-c", "echo 1 > /sys/class/graphics/fbcon/cursor_blink"],
+                timeout=2)
         except Exception:
             pass
 
