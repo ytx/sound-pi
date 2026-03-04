@@ -172,6 +172,12 @@ class App:
                 menu.hide()
                 return
 
+        # Check if current screen has an active overlay (e.g. mixer add-device)
+        screen = self._screens.get(self._current_screen_id)
+        if screen and getattr(screen, '_adding', False):
+            screen.on_touch(x, y, event_type)
+            return
+
         # Top-left tap → main menu
         if MAIN_MENU_REGION.collidepoint(x, y):
             self._settings_menu.hide()
@@ -185,31 +191,45 @@ class App:
             return
 
         # Forward to current screen
-        screen = self._screens.get(self._current_screen_id)
         if screen:
             screen.on_touch(x, y, event_type)
 
     def _process_gpio(self):
+        mixer = self._screens["mixer"]
         for evt in self._gpio.poll_events():
-            if evt == EVT_ROTATE_CW:
-                self._volume = min(100, self._volume + VOLUME_STEP)
-                self._pipewire.set_volume(self._volume)
-                config.set("master_volume", self._volume)
-                self._volume_overlay.show(self._volume)
-                self._gpio.set_led_brightness(self._volume / 100.0)
-            elif evt == EVT_ROTATE_CCW:
-                self._volume = max(0, self._volume - VOLUME_STEP)
-                self._pipewire.set_volume(self._volume)
-                config.set("master_volume", self._volume)
-                self._volume_overlay.show(self._volume)
-                self._gpio.set_led_brightness(self._volume / 100.0)
+            if evt in (EVT_ROTATE_CW, EVT_ROTATE_CCW):
+                slot = mixer.get_selected_slot()
+                if slot and slot.wpctl_id:
+                    delta = (VOLUME_STEP / 100.0) if evt == EVT_ROTATE_CW else -(VOLUME_STEP / 100.0)
+                    slot.volume = max(0.0, min(1.0, slot.volume + delta))
+                    self._pipewire.set_sink_volume(slot.wpctl_id, slot.volume)
+                    self._volume_overlay.show(int(slot.volume * 100))
+                    self._gpio.set_led_brightness(slot.volume)
+                    mixer.save_config()
+                else:
+                    # No device selected — fallback to master volume
+                    if evt == EVT_ROTATE_CW:
+                        self._volume = min(100, self._volume + VOLUME_STEP)
+                    else:
+                        self._volume = max(0, self._volume - VOLUME_STEP)
+                    self._pipewire.set_volume(self._volume)
+                    config.set("master_volume", self._volume)
+                    self._volume_overlay.show(self._volume)
+                    self._gpio.set_led_brightness(self._volume / 100.0)
             elif evt == EVT_BUTTON_SHORT:
                 self._hid.play_pause()
             elif evt == EVT_BUTTON_LONG:
-                self._muted = not self._muted
-                self._pipewire.set_mute(self._muted)
-                config.set("muted", self._muted)
-                self._mute_overlay.show(self._muted)
+                slot = mixer.get_selected_slot()
+                if slot and slot.wpctl_id:
+                    slot.muted = not slot.muted
+                    self._pipewire.set_sink_mute(slot.wpctl_id, slot.muted)
+                    self._mute_overlay.show(slot.muted)
+                    mixer.save_config()
+                else:
+                    self._muted = not self._muted
+                    self._pipewire.set_mute(self._muted)
+                    config.set("muted", self._muted)
+                    self._mute_overlay.show(self._muted)
 
     def _update(self, dt: float):
         screen = self._screens.get(self._current_screen_id)
@@ -234,6 +254,7 @@ class App:
 
     def _shutdown(self):
         log.info("shutting down")
+        config.persist()
         self._audio_capture.stop()
         self._pipewire.stop_routing()
         self._gpio.stop()

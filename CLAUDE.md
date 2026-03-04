@@ -1,7 +1,7 @@
 # Sound-Pi
 
 Raspberry Pi 4 + 3.5インチ SPI LCD (480x320) で動作するオーディオルーティングデバイス。
-PC/Mac からの USB Audio (UAC2 ガジェット) 入力を受け取り、USB/BT 出力デバイスへルーティングする。
+PC/Mac からの USB Audio (UAC2 ガジェット) 入力を受け取り、最大4台の USB/BT 出力デバイスへ同時ルーティングする。
 
 ## 技術スタック
 
@@ -21,14 +21,18 @@ PC/Mac からの USB Audio (UAC2 ガジェット) 入力を受け取り、USB/BT
 
 ```
 PC/Mac (USB-C) → UAC2 Gadget (dwc2, S16_LE 48kHz) → PipeWire capture
-    ↓ pw-loopback (自動起動)
-USB/BT 出力デバイス (PipeWire sink)
+    ↓ pw-loopback (デバイスごとに独立プロセス)
+USB/BT 出力デバイス1 (PipeWire sink)
+USB/BT 出力デバイス2 (PipeWire sink)  ← 最大4台同時
     ↓ 同時に
 pw-cat --record → numpy FFT → VU メーター / スペクトラム表示
 ```
 
-- **ルーティング**: `PipeWireManager.start_routing()` がアプリ起動時に `pw-loopback` を自動起動
-- **メータリング**: `AudioCapture` が `pw-cat` でUAC2ソースをキャプチャ、RMS/FFT計算
+- **マルチシンクルーティング**: デバイスごとに独立した `pw-loopback` プロセスを起動
+- **デバイス識別**: `node.name` で保存（USB シリアル番号含む、リブート跨ぎで安定）、ランタイムは wpctl ID
+- **プロファイル自動切替**: `aplay -l` で ALSA playback デバイスを検出、PipeWire Device の `device.nick` でマッチ、Sink がなければ `wpctl set-profile <id> 1` (pro-audio) に自動切替
+- **出力なし時**: OUTPUT CONTROL にデバイスがなければ `pw-loopback` を起動しない（デフォルトシンクへのフォールバックなし）
+- **メータリング**: `AudioCapture` が `pw-cat` でUAC2ソースをキャプチャ、RMS/FFT計算（dBスケール）
 
 ## 表示パイプライン
 
@@ -56,9 +60,9 @@ LCD表示
 起動 → VuMeter（デフォルト）
 左上100x100タップ → メインメニュー（3×2タイル: VU/DualVU/Spectrum/Mixer）
 右上100x100タップ → 設定メニュー（3×2タイル: System/BT/WiFi/Develop）
-ロータリー回転 → VolumeOverlay（2秒後消える）
+ロータリー回転 → 選択デバイスの音量変更 + VolumeOverlay（デバイス未設定時はマスター音量）
 ロータリー短押し → Play/Pause (USB HID)
-ロータリー長押し → Mute切替
+ロータリー長押し → 選択デバイスのMute切替（デバイス未設定時はマスターMute）
 ```
 
 ## 重要な注意点
@@ -90,9 +94,44 @@ LCD表示
 - `rp1-test.service` はマスクしない
 - `xserver-xorg-legacy` はインストールしない
 
+### PipeWire マルチシンク
+- **デバイス候補取得**: `aplay -l` → ALSA playback デバイス一覧（内蔵・HDMI・UAC2 は除外）
+- **PipeWire Device マッチ**: `pw-cli ls Device` の `device.nick` == ALSA の long_name（`[]` 内）
+- **プロファイル問題**: USB ヘッドセット等で WirePlumber が入力のみのプロファイルを選ぶことがある → `wpctl set-profile <device_id> 1` (pro-audio) で Sink を出現させる
+- **`wpctl inspect` の UTF-8 問題**: pro-audio プロファイルのノードは `audio.position` に不正な UTF-8 バイトを含む → `decode("utf-8", errors="replace")` が必須
+- **`pw-cli ls Node` の制限**: pro-audio プロファイルのノードは `media.class` が出力されないことがある → Sink 検索には `wpctl status` のパースを使う
+- **per-sink 音量/ミュート**: `wpctl set-volume/set-mute <node_id> <value>` で個別制御
+
+### 設定永続化 (config-persistence)
+- 設定ファイル: `~/.config/sound-pi/config.json`
+- overlayFS 環境では `/boot/firmware/config/save.sh --all` で FAT32 パーティションに永続化
+- **即時永続化**: デバイス追加/削除時（低頻度の操作）
+- **一括永続化**: アプリ終了時（音量変更等の高頻度操作分をまとめて保存）
+- Ansible: `sound-pi-pygame` ロールで `save.sh` により config ファイルを登録
+
 ### デプロイ
 - アプリは `/opt/sound-pi/` にデプロイ（git リポジトリではない）
 - git branch 表示: ansible が `VERSION` ファイルを生成（`branch (short-hash)` 形式）
+- **scp で直接デプロイ**: `scp py/<file> sound-pi:/opt/sound-pi/<file>` + `sudo systemctl restart sound-pi` で素早く反映可能
+
+## OUTPUT CONTROL 画面 (MixerScreen)
+
+```
+┌────────────────────────────────────────────────┐
+│            OUTPUT CONTROL                      │
+├──────────┬──────────┬──────────┬──────────┬────┤
+│  XROUND  │  B10Pro  │    +     │    +     │    │  ← 空スロットタップで追加
+│  ┃████┃  │  ┃████┃  │          │          │    │
+│  ┃████┃  │  ┃██  ┃  │          │          │    │  ← 縦スライダー(タッチドラッグ)
+│   75%    │   50%    │          │          │    │
+│   [M]    │   [M]    │          │          │    │  ← ミュートボタン
+│   [×]    │   [×]    │          │          │    │  ← 削除ボタン
+└──────────┴──────────┴──────────┴──────────┴────┘
+```
+
+- 4スロット固定、選択中スロットはシアン枠（ロータリーエンコーダのターゲット）
+- 空スロットタップ → ALSA デバイス一覧オーバーレイ → デバイス追加
+- config 保存形式: `output_devices: [{node_name, pw_device_name, volume, muted}, ...]`
 
 ## Ansible ロール
 

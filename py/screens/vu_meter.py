@@ -41,8 +41,10 @@ class VuMeterScreen(Screen):
 
     def update(self, dt: float):
         data = self._audio.get_data()
-        target = (data["level_l"] + data["level_r"]) * 0.5
-        target = min(1.0, target * 30.0)
+        import math
+        rms = (data["level_l"] + data["level_r"]) * 0.5
+        # dB scale: -40dB → 0.0, 0dB → 1.0
+        target = max(0.0, min(1.0, 1.0 + math.log10(rms + 1e-10) / 1.6))
 
         if target > self._needle_pos:
             self._needle_pos += (target - self._needle_pos) * ATTACK

@@ -26,7 +26,9 @@ class _MeterState:
         self.peak = 0.0
 
     def update(self, target: float):
-        target = min(1.0, target * 30.0)
+        import math
+        # dB scale: -40dB → 0.0, 0dB → 1.0
+        target = max(0.0, min(1.0, 1.0 + math.log10(target + 1e-10) / 1.6))
         if target > self.needle:
             self.needle += (target - self.needle) * ATTACK
         else:

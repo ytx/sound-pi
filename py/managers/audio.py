@@ -4,7 +4,10 @@ import subprocess
 import threading
 import struct
 import math
+import re
+import time
 
+import config as cfg
 from logger import get_logger
 
 log = get_logger("audio")
@@ -236,22 +239,364 @@ class PipeWireManager:
     """Control PipeWire via wpctl and manage audio routing."""
 
     def __init__(self):
-        self._loopback_proc: subprocess.Popen | None = None
+        self._loopback_procs: dict[str, subprocess.Popen] = {}
+        self._sinks_cache: list[dict] = []
+        self._uac2_source: str | None = None
 
-    def start_routing(self, source: str | None = None, sink: str | None = None):
-        """Start pw-loopback to route audio from source to sink.
+    # ── ALSA device discovery ──
 
-        If source/sink are None, auto-detect UAC2 source and default sink.
+    # Cards to exclude from the add-device list
+    _EXCLUDE_NICKS = {"bcm2835 Headphones", "vc4-hdmi-0", "vc4-hdmi-1", "UAC2_Gadget"}
+
+    def list_alsa_playback_devices(self) -> list[dict]:
+        """List ALSA playback devices via aplay -l.
+        Returns: [{"card_num": 4, "card_name": "B10Pro",
+                   "long_name": "B10Pro", "description": "USB Audio"}]
         """
-        if self._loopback_proc is not None:
-            return
+        try:
+            out = subprocess.check_output(
+                ["aplay", "-l"], timeout=5, text=True, stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            log.warning("aplay -l failed: %s", e)
+            return []
 
-        if source is None:
-            source = self._find_node_name("UAC2")
+        devices: list[dict] = []
+        # "card 4: B10Pro [B10Pro], device 0: USB Audio [USB Audio]"
+        for m in re.finditer(
+            r"^card\s+(\d+):\s+(\S+)\s+\[(.+?)\],\s+device\s+\d+:\s+(.+?)\s+\[",
+            out, re.MULTILINE,
+        ):
+            card_num = int(m.group(1))
+            card_name = m.group(2)
+            long_name = m.group(3)
+            description = m.group(4)
+            devices.append({
+                "card_num": card_num,
+                "card_name": card_name,
+                "long_name": long_name,
+                "description": description,
+            })
+        return devices
+
+    def list_pw_audio_devices(self) -> list[dict]:
+        """List PipeWire Audio/Device entries.
+        Returns: [{"id": 48, "nick": "B10Pro", "device_name": "alsa_card.usb-..."}]
+        """
+        try:
+            out = subprocess.check_output(
+                ["pw-cli", "ls", "Device"], timeout=5, text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            log.warning("pw-cli ls Device failed: %s", e)
+            return []
+
+        devices: list[dict] = []
+        lines = out.splitlines()
+        block: list[str] = []
+        for line in lines:
+            if line.strip().startswith("id "):
+                dev = self._parse_pw_device_block(block)
+                if dev:
+                    devices.append(dev)
+                block = [line]
+            else:
+                block.append(line)
+        dev = self._parse_pw_device_block(block)
+        if dev:
+            devices.append(dev)
+        return devices
+
+    @staticmethod
+    def _parse_pw_device_block(lines: list[str]) -> dict | None:
+        props: dict[str, str] = {}
+        dev_id = None
+        for line in lines:
+            s = line.strip()
+            if s.startswith("id "):
+                m = re.match(r"id\s+(\d+)", s)
+                if m:
+                    dev_id = int(m.group(1))
+            if "=" in s and not s.startswith("id "):
+                key, _, val = s.partition("=")
+                key = key.strip().strip("*").strip()
+                val = val.strip().strip('"')
+                props[key] = val
+        if props.get("media.class") != "Audio/Device":
+            return None
+        if props.get("device.api") != "alsa":
+            return None
+        return {
+            "id": dev_id,
+            "nick": props.get("device.nick", ""),
+            "device_name": props.get("device.name", ""),
+        }
+
+    def list_addable_devices(self) -> list[dict]:
+        """Return ALSA playback devices available to add as output.
+        Merges aplay info with PipeWire device ID.
+        Returns: [{"card_name": "B10Pro", "long_name": "B10Pro",
+                   "pw_device_id": 48, "pw_device_name": "alsa_card.usb-..."}]
+        """
+        alsa = self.list_alsa_playback_devices()
+        pw_devs = self.list_pw_audio_devices()
+
+        # Build nick → pw_device map
+        nick_map = {d["nick"]: d for d in pw_devs}
+
+        result: list[dict] = []
+        for a in alsa:
+            # Skip internal devices
+            if a["long_name"] in self._EXCLUDE_NICKS:
+                continue
+            pw = nick_map.get(a["long_name"])
+            if not pw:
+                continue
+            result.append({
+                "card_name": a["card_name"],
+                "long_name": a["long_name"],
+                "pw_device_id": pw["id"],
+                "pw_device_name": pw["device_name"],
+            })
+        return result
+
+    def ensure_sink_profile(self, pw_device_id: int, pw_device_name: str = "") -> str | None:
+        """Ensure the PipeWire device has a Sink-capable profile.
+        Sets pro-audio (index 1) if current profile has no Sink.
+        Returns node_name of the Sink, or None on failure.
+        """
+        # Check if a sink already exists for this device
+        self.list_sinks()
+        existing = self._find_sink_for_device(pw_device_id)
+        if existing:
+            return existing
+
+        # No sink — switch to pro-audio profile (index 1)
+        log.info("switching device %d to pro-audio profile", pw_device_id)
+        try:
+            subprocess.run(
+                ["wpctl", "set-profile", str(pw_device_id), "1"],
+                timeout=5, check=True,
+            )
+        except Exception as e:
+            log.warning("set-profile failed for device %d: %s", pw_device_id, e)
+            return None
+
+        # Wait for sink to appear
+        for _ in range(10):
+            time.sleep(0.3)
+            self.list_sinks()
+            found = self._find_sink_for_device(pw_device_id)
+            if found:
+                log.info("sink appeared: %s", found)
+                return found
+        log.warning("sink did not appear for device %d", pw_device_id)
+        return None
+
+    def _find_sink_for_device(self, pw_device_id: int) -> str | None:
+        """Find a sink belonging to a PipeWire device.
+        Uses wpctl status to get sink IDs, then wpctl inspect to match device.id.
+        """
+        sink_ids = self._list_sink_ids_from_status()
+        for sid in sink_ids:
+            try:
+                raw = subprocess.check_output(
+                    ["wpctl", "inspect", str(sid)], timeout=3,
+                    stderr=subprocess.DEVNULL,
+                )
+                out = raw.decode("utf-8", errors="replace")
+                dev_id = None
+                node_name = None
+                for line in out.splitlines():
+                    s = line.strip()
+                    if "device.id" in s and "=" in s:
+                        dev_id = s.split("=", 1)[1].strip().strip('"')
+                    if "node.name" in s and "=" in s:
+                        node_name = s.split("=", 1)[1].strip().strip('"')
+                if dev_id == str(pw_device_id) and node_name:
+                    return node_name
+            except Exception:
+                pass
+        return None
+
+    @staticmethod
+    def _list_sink_ids_from_status() -> list[int]:
+        """Parse wpctl status to get all Sink node IDs."""
+        try:
+            out = subprocess.check_output(
+                ["wpctl", "status"], timeout=5, text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return []
+        ids: list[int] = []
+        in_sinks = False
+        for line in out.splitlines():
+            stripped = line.strip()
+            if "Sinks:" in stripped:
+                in_sinks = True
+                continue
+            if in_sinks:
+                if "Sources:" in stripped or "Filters:" in stripped or "Streams:" in stripped:
+                    in_sinks = False
+                    continue
+                # " *   73. XROUND..." or "     35. Built-in..."
+                m = re.search(r"(\d+)\.", stripped)
+                if m:
+                    ids.append(int(m.group(1)))
+        return ids
+
+    # ── Sink discovery ──
+
+    def list_sinks(self) -> list[dict]:
+        """Return all Audio/Sink nodes.
+        Returns: [{"id": 73, "node_name": "alsa_output.usb-...",
+                   "nick": "...", "description": "..."}]
+        """
+        try:
+            out = subprocess.check_output(
+                ["pw-cli", "ls", "Node"], timeout=5, text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            log.warning("list_sinks failed: %s", e)
+            return []
+
+        sinks: list[dict] = []
+        lines = out.splitlines()
+        block: list[str] = []
+        for line in lines:
+            if line.strip().startswith("id "):
+                sink = self._parse_sink_block(block)
+                if sink:
+                    sinks.append(sink)
+                block = [line]
+            else:
+                block.append(line)
+        sink = self._parse_sink_block(block)
+        if sink:
+            sinks.append(sink)
+
+        self._sinks_cache = sinks
+        return sinks
+
+    @staticmethod
+    def _parse_sink_block(lines: list[str]) -> dict | None:
+        """Parse a pw-cli node block into a sink dict if it's Audio/Sink."""
+        props: dict[str, str] = {}
+        node_id = None
+        for line in lines:
+            s = line.strip()
+            if s.startswith("id "):
+                # "id 73, type PipeWire:Interface:Node/3, ..."
+                m = re.match(r"id\s+(\d+)", s)
+                if m:
+                    node_id = int(m.group(1))
+            if "=" in s and not s.startswith("id "):
+                key, _, val = s.partition("=")
+                key = key.strip().strip("*").strip()
+                val = val.strip().strip('"')
+                props[key] = val
+        media_class = props.get("media.class", "")
+        if media_class != "Audio/Sink":
+            return None
+        node_name = props.get("node.name", "")
+        if not node_name:
+            return None
+        return {
+            "id": node_id,
+            "node_name": node_name,
+            "nick": props.get("node.nick", ""),
+            "description": props.get("node.description", ""),
+        }
+
+    def resolve_node_name(self, node_name: str) -> int | None:
+        """node_name → current wpctl ID. Uses cached sink list."""
+        if not self._sinks_cache:
+            self.list_sinks()
+        for s in self._sinks_cache:
+            if s["node_name"] == node_name:
+                return s["id"]
+        # Cache miss — refresh once
+        self.list_sinks()
+        for s in self._sinks_cache:
+            if s["node_name"] == node_name:
+                return s["id"]
+        return None
+
+    # ── Per-sink volume/mute ──
+
+    def get_sink_volume(self, wpctl_id: int) -> tuple[float, bool]:
+        """wpctl get-volume <id> → (volume 0.0-1.0, muted)."""
+        try:
+            out = subprocess.check_output(
+                ["wpctl", "get-volume", str(wpctl_id)],
+                timeout=2, text=True,
+            )
+            parts = out.strip().split()
+            vol = float(parts[1]) if len(parts) >= 2 else 0.5
+            muted = "[MUTED]" in out
+            return (vol, muted)
+        except Exception as e:
+            log.warning("get_sink_volume(%d) failed: %s", wpctl_id, e)
+            return (0.5, False)
+
+    def set_sink_volume(self, wpctl_id: int, volume: float):
+        """Set volume on a specific sink (0.0-1.0)."""
+        vol = max(0.0, min(1.0, volume))
+        try:
+            subprocess.run(
+                ["wpctl", "set-volume", str(wpctl_id), f"{vol:.2f}"],
+                timeout=2, check=True,
+            )
+        except Exception as e:
+            log.warning("set_sink_volume(%d) failed: %s", wpctl_id, e)
+
+    def set_sink_mute(self, wpctl_id: int, muted: bool):
+        """Set mute state on a specific sink."""
+        try:
+            subprocess.run(
+                ["wpctl", "set-mute", str(wpctl_id), "1" if muted else "0"],
+                timeout=2, check=True,
+            )
+        except Exception as e:
+            log.warning("set_sink_mute(%d) failed: %s", wpctl_id, e)
+
+    # ── Multi-sink routing ──
+
+    def _find_uac2_source(self) -> str | None:
+        """Find and cache the UAC2 gadget source node name."""
+        if self._uac2_source:
+            return self._uac2_source
+        self._uac2_source = self._find_node_name("UAC2")
+        return self._uac2_source
+
+    def start_routing(self, targets: list[str] | None = None):
+        """Start pw-loopback for each target node_name.
+        If targets is None, reads from config output_devices.
+        If no targets configured, routes to default sink (single loopback).
+        """
+        source = self._find_uac2_source()
         if not source:
             log.info("routing: no UAC2 source found, skipping")
             return
 
+        if targets is None:
+            devices = cfg.get("output_devices", [])
+            targets = [d["node_name"] for d in devices] if devices else []
+
+        if not targets:
+            log.info("routing: no output devices configured, no loopback started")
+            return
+
+        for node_name in targets:
+            self._start_loopback(source, node_name, node_name)
+
+    def _start_loopback(self, source: str, sink: str | None, key: str):
+        """Start a single pw-loopback process."""
+        if key in self._loopback_procs:
+            return
         cmd = [
             "pw-loopback",
             "-C", source,
@@ -260,26 +605,49 @@ class PipeWireManager:
         ]
         if sink:
             cmd += ["-P", sink]
-
         try:
-            self._loopback_proc = subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            log.info("routing started: %s → %s (pid=%d)",
-                     source, sink or "default", self._loopback_proc.pid)
+            self._loopback_procs[key] = proc
+            log.info("loopback started: %s → %s (pid=%d)",
+                     source, sink or "default", proc.pid)
         except Exception as e:
-            log.warning("routing start failed: %s", e)
+            log.warning("loopback start failed (%s): %s", sink or "default", e)
+
+    def add_route(self, node_name: str) -> bool:
+        """Add routing to a single sink. Returns True on success."""
+        source = self._find_uac2_source()
+        if not source:
+            log.warning("add_route: no UAC2 source")
+            return False
+        # Remove default loopback if present
+        if "__default__" in self._loopback_procs:
+            self._stop_loopback("__default__")
+        self._start_loopback(source, node_name, node_name)
+        return node_name in self._loopback_procs
+
+    def remove_route(self, node_name: str):
+        """Stop routing to a single sink."""
+        self._stop_loopback(node_name)
+
+    def _stop_loopback(self, key: str):
+        proc = self._loopback_procs.pop(key, None)
+        if proc:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            log.info("loopback stopped: %s", key)
 
     def stop_routing(self):
-        """Stop pw-loopback routing."""
-        if self._loopback_proc:
-            self._loopback_proc.terminate()
-            try:
-                self._loopback_proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self._loopback_proc.kill()
-            self._loopback_proc = None
-            log.info("routing stopped")
+        """Stop all pw-loopback processes."""
+        for key in list(self._loopback_procs):
+            self._stop_loopback(key)
+        log.info("all routing stopped")
+
+    # ── Legacy node finder ──
 
     def _find_node_name(self, nick_pattern: str) -> str | None:
         """Find a PipeWire node name by nick pattern."""
@@ -314,6 +682,8 @@ class PipeWireManager:
                 node_name = s.split("=", 1)[1].strip().strip('"')
         return node_name if has_nick else None
 
+    # ── Legacy master volume (kept for backward compat) ──
+
     def get_volume(self) -> int:
         """Get current master volume as 0-100."""
         try:
@@ -321,7 +691,6 @@ class PipeWireManager:
                 ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
                 timeout=2, text=True,
             )
-            # "Volume: 0.80" or "Volume: 0.80 [MUTED]"
             parts = out.strip().split()
             if len(parts) >= 2:
                 return int(float(parts[1]) * 100)

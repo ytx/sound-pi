@@ -74,6 +74,18 @@ def draw_button(surface: pygame.Surface, x: int, y: int, w: int, h: int,
     draw_text(surface, text, x + w // 2, y + h // 2, WHITE, 16, center=True)
 
 
+def draw_vslider(surface: pygame.Surface, x: int, y: int, w: int, h: int,
+                 value: float, color=CYAN, bg=DARK_GRAY, muted: bool = False):
+    """Draw a vertical slider (value 0.0-1.0, fills from bottom).
+    muted=True draws in gray."""
+    fill_color = GRAY if muted else color
+    pygame.draw.rect(surface, bg, (x, y, w, h))
+    fill_h = int(h * max(0.0, min(1.0, value)))
+    if fill_h > 0:
+        pygame.draw.rect(surface, fill_color, (x, y + h - fill_h, w, fill_h))
+    pygame.draw.rect(surface, GRAY, (x, y, w, h), 1)
+
+
 def level_color(value: float) -> tuple[int, int, int]:
     """Return green/yellow/red based on level."""
     if value < 0.6:
