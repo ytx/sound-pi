@@ -21,7 +21,7 @@ SW_PIN = 26
 # sysfs PWM for LED
 PWM_CHIP = Path("/sys/class/pwm/pwmchip0")
 PWM_CHANNEL = PWM_CHIP / "pwm1"  # pin13 = PWM0_1 → channel 1
-PWM_PERIOD_NS = 1_000_000  # 1ms = 1kHz
+PWM_PERIOD_NS = 5_000  # 5us = 200kHz (above audible range to avoid audio noise)
 
 # Events
 EVT_ROTATE_CW = "rotate_cw"

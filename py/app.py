@@ -125,6 +125,7 @@ class App:
 
         # Start subsystems
         self._audio_capture.start()
+        self._pipewire.start_routing()
         self._gpio.start()
         self._screens[self._current_screen_id].on_enter()
 
@@ -234,6 +235,7 @@ class App:
     def _shutdown(self):
         log.info("shutting down")
         self._audio_capture.stop()
+        self._pipewire.stop_routing()
         self._gpio.stop()
         self._hid.close()
         self._touch.close()

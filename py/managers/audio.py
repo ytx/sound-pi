@@ -233,7 +233,86 @@ class AudioCapture:
 
 
 class PipeWireManager:
-    """Control PipeWire via wpctl."""
+    """Control PipeWire via wpctl and manage audio routing."""
+
+    def __init__(self):
+        self._loopback_proc: subprocess.Popen | None = None
+
+    def start_routing(self, source: str | None = None, sink: str | None = None):
+        """Start pw-loopback to route audio from source to sink.
+
+        If source/sink are None, auto-detect UAC2 source and default sink.
+        """
+        if self._loopback_proc is not None:
+            return
+
+        if source is None:
+            source = self._find_node_name("UAC2")
+        if not source:
+            log.info("routing: no UAC2 source found, skipping")
+            return
+
+        cmd = [
+            "pw-loopback",
+            "-C", source,
+            "--channels", "2",
+            "--latency", "50",
+        ]
+        if sink:
+            cmd += ["-P", sink]
+
+        try:
+            self._loopback_proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            log.info("routing started: %s → %s (pid=%d)",
+                     source, sink or "default", self._loopback_proc.pid)
+        except Exception as e:
+            log.warning("routing start failed: %s", e)
+
+    def stop_routing(self):
+        """Stop pw-loopback routing."""
+        if self._loopback_proc:
+            self._loopback_proc.terminate()
+            try:
+                self._loopback_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._loopback_proc.kill()
+            self._loopback_proc = None
+            log.info("routing stopped")
+
+    def _find_node_name(self, nick_pattern: str) -> str | None:
+        """Find a PipeWire node name by nick pattern."""
+        try:
+            out = subprocess.check_output(
+                ["pw-cli", "ls", "Node"], timeout=5, text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            lines = out.splitlines()
+            block: list[str] = []
+            for line in lines:
+                if line.strip().startswith("id "):
+                    result = self._match_node_block(block, nick_pattern)
+                    if result:
+                        return result
+                    block = [line]
+                else:
+                    block.append(line)
+            return self._match_node_block(block, nick_pattern)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _match_node_block(lines: list[str], nick_pattern: str) -> str | None:
+        has_nick = False
+        node_name = None
+        for line in lines:
+            s = line.strip()
+            if "node.nick" in s and nick_pattern in s:
+                has_nick = True
+            if "node.name" in s and "=" in s:
+                node_name = s.split("=", 1)[1].strip().strip('"')
+        return node_name if has_nick else None
 
     def get_volume(self) -> int:
         """Get current master volume as 0-100."""
