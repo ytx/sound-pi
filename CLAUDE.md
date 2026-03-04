@@ -97,10 +97,24 @@ LCD表示
 ### PipeWire マルチシンク
 - **デバイス候補取得**: `aplay -l` → ALSA playback デバイス一覧（内蔵・HDMI・UAC2 は除外）
 - **PipeWire Device マッチ**: `pw-cli ls Device` の `device.nick` == ALSA の long_name（`[]` 内）
-- **プロファイル問題**: USB ヘッドセット等で WirePlumber が入力のみのプロファイルを選ぶことがある → `wpctl set-profile <device_id> 1` (pro-audio) で Sink を出現させる
+- **プロファイル自動選択**: ACP (ALSA Card Profiles) が USB デバイスごとに適切なプロファイルを生成。`ensure_sink_profile` で Audio/Sink を持つプロファイルを自動選択（analog-stereo 優先、pro-audio はフォールバック）
 - **`wpctl inspect` の UTF-8 問題**: pro-audio プロファイルのノードは `audio.position` に不正な UTF-8 バイトを含む → `decode("utf-8", errors="replace")` が必須
 - **`pw-cli ls Node` の制限**: pro-audio プロファイルのノードは `media.class` が出力されないことがある → Sink 検索には `wpctl status` のパースを使う
 - **per-sink 音量/ミュート**: `wpctl set-volume/set-mute <node_id> <value>` で個別制御
+- **ノード名の変動**: ACP プロファイルにより node_name が変わる（例: `pro-output-0` ↔ `analog-stereo`）。config には `pw_device_name`（安定）も保存し、node_name が見つからない場合はデバイス名からフォールバック解決
+- **`start_routing` 2パス方式**: (1) 全ノード名解決＋プロファイル切替 → 1秒待機 → (2) pw-loopback 一斉起動。プロファイル切替直後は PipeWire がシンクを初期化中のため待機が必要
+
+### PipeWire 設定の注意点（重要）
+- **`default.clock.allowed-rates`**: `[ 44100 48000 96000 ]` を設定済み（`10-sound-pi.conf`）。B10Pro は 96kHz 対応
+- **`api.alsa.use-acp=false` は絶対に使わない** — audioconvert が `audio.channels=64` を返すバグ＋ ALSA デバイスロック (-EBUSY) が発生。WirePlumber の `50-usb-audio.conf` は Ansible で明示削除している
+- **B10Pro は S24_3LE のみ対応** — S16_LE では ALSA デバイスを開けない（`hw:B10Pro` で "Invalid argument"）。PipeWire/pw-loopback 経由なら自動変換される。`plughw:` も使える
+
+### B10Pro 既知の問題（未解決）
+- **詳細**: `b10pro.txt` を参照
+- **リブート後**: WirePlumber が毎回 `input:mono-fallback` を選択（Sink なし）
+- **アプリの `ensure_sink_profile`** が pro-audio (index 1) に切り替えるが、pro-audio の Sink は `audio.channels=0`、EnumFormat 空で壊れている
+- **セッション中の手動操作**（プロファイル切替、WirePlumber 再起動等）を繰り返すと `analog-stereo` プロファイルが出現して動作するが、どの操作が決め手かは未特定
+- **EnumProfile**: off(0), pro-audio(1), input:mono-fallback(2) の3つのみ。`analog-stereo` は EnumProfile に存在しないが、特定条件下で出現する
 
 ### 設定永続化 (config-persistence)
 - 設定ファイル: `~/.config/sound-pi/config.json`
@@ -112,7 +126,9 @@ LCD表示
 ### デプロイ
 - アプリは `/opt/sound-pi/` にデプロイ（git リポジトリではない）
 - git branch 表示: ansible が `VERSION` ファイルを生成（`branch (short-hash)` 形式）
-- **scp で直接デプロイ**: `scp py/<file> sound-pi:/opt/sound-pi/<file>` + `sudo systemctl restart sound-pi` で素早く反映可能
+- **Ansible デプロイはユーザーが実行する** — Claude が `ansible-playbook` を実行してはいけない
+- **overlay FS**: sound-pi は overlay ファイルシステムを使用。デバイス上の直接変更はリブートで消える。すべての永続設定は Ansible ロールで管理すること
+- **scp で直接デプロイ**: `scp py/<file> sound-pi:/opt/sound-pi/<file>` + `sudo systemctl restart sound-pi` で素早く反映可能（テスト用、overlay なのでリブートで消える）
 
 ## OUTPUT CONTROL 画面 (MixerScreen)
 

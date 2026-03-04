@@ -1,0 +1,131 @@
+B10Pro 音声出力トラブルシューティング記録
+============================================
+
+## デバイス情報
+
+- ALSA カード名: B10Pro
+- USB descriptor: "Mpow HC5 Headset in charging mode - HID / Mass Storage"
+- PipeWire device name: alsa_card.usb-TaiYiLian_B10Pro_D09739B16F03195D3B07-02
+- Playback: S24_3LE のみ (24bit), 2ch, 96000/48000/44100Hz, Interface 4
+- Capture: S16_LE, 1ch (mono), Interface 3
+- device.profile-set: analog-only.conf
+- api.acp.auto-profile: false
+
+## リブート後の状態（毎回）
+
+- WirePlumber の find-best-profile.lua が `input:mono-fallback` を選択
+- B10Pro に Audio/Sink が存在しない（Source のみ）
+- pw-loopback を起動しても ALSA Status: Stop のまま
+
+## EnumProfile（利用可能なプロファイル）
+
+  0: "off" (available=yes)
+  1: "pro-audio" (available=yes) → Audio/Sink + Audio/Source
+  2: "input:mono-fallback" (available=unknown) → Audio/Source のみ
+
+  ※ analog-stereo は EnumProfile に存在しない
+
+## find-best-profile.lua の挙動
+
+  WirePlumber DEBUG ログ:
+    find-best-profile.lua:69: Found best profile 'input:mono-fallback' (2)
+    apply-profile.lua:37: Profile input:mono-fallback is already set
+
+  ロジック: available=yes のプロファイルを優先 → off と pro-audio のみ
+  → pro-audio はスキップされ、available=unknown の input:mono-fallback が選ばれる
+
+## 前回のセッションで音が出るまでの作業（時系列）
+
+### 1. 初期確認
+  - wpctl status → B10Pro は Source (71) のみ、Sink なし
+  - pw-cli enum-params 48 EnumProfile → off/pro-audio/input:mono-fallback の3つ
+  - 現在のプロファイル: input:mono-fallback（Sink なし）
+
+### 2. 手動プロファイル切替
+  - wpctl set-profile 48 1  (pro-audio に切替)
+  - → Sink 72 が出現: "Mpow HC5... Pro"
+  - → ただし audio.channels = "0", audio.position = 壊れた UTF-8
+
+### 3. WirePlumber ルール作成 (50-b10pro.conf) ※後に削除
+  monitor.alsa.rules = [
+    { matches = [{ device.name = "~alsa_card.usb-TaiYiLian_B10Pro*" }]
+      actions = { update-props = {
+        api.acp.auto-profile = false,
+        device.profile = "stereo-fallback"
+      } } }
+  ]
+  - systemctl --user restart wireplumber pipewire
+  - → Sink 68: "Mpow HC5... Analog Stereo" が出現（audio.channels=2, 正常）
+  - → ただし find-best-profile.lua が "stereo-fallback" を EnumProfile から見つけられず無視
+  - → 結局 WirePlumber 再起動時に input:mono-fallback に戻る
+
+### 4. アプリコード修正 (ensure_sink_profile)
+  - EnumProfile を列挙し、Audio/Sink を含むプロファイルを探す
+  - 見つけたら wpctl set-profile で切替 → Sink 出現を待つ
+  - pro-audio (index 1) が Audio/Sink を持つので、これが選択される
+  - → Sink 出現成功: alsa_output...pro-output-0
+
+### 5. pw-loopback 起動 → ALSA Status: Stop
+  - pw-loopback は起動するが、B10Pro の ALSA が Running にならない
+  - pro-audio プロファイルの sink: audio.channels=0, EnumFormat 空
+
+### 6. PipeWire allowed-rates に 96000 追加
+  10-sound-pi.conf:
+    default.clock.allowed-rates = [ 44100 48000 96000 ]
+  （以前は [ 48000 ] のみ）
+  - systemctl --user restart pipewire wireplumber
+
+### 7. 再度 wpctl set-profile 48 1 → pw-loopback 起動
+  - pw-loopback -C alsa_input...UAC2... -P alsa_output...B10Pro...pro-output-0
+  - → ALSA Status: Running ← ここで初めて音が出た
+  - Interface=4, Altset=1, Packet Size=432, freq=48000Hz
+
+### 8. 50-usb-audio.conf (api.alsa.use-acp=false) の試行と撤回
+  - api.alsa.use-acp=false → audio.channels=64 バグ + EBUSY
+  - 完全に撤回、Ansible で明示削除
+
+### 9. 今セッション冒頭（リブートなし、前セッションの状態継続）
+  - B10Pro に analog-stereo プロファイルが存在（device 54）
+  - audio.channels=2, audio.position=FL,FR（正常）
+  - speaker-test -D hw:B10Pro -F S24_3LE → 成功
+  - pw-loopback → ALSA Running
+
+### 10. Ansible デプロイ + リブート後
+  - analog-stereo 消失、pro-audio のみ
+  - audio.channels=0（壊れている）
+  - pw-loopback 起動済みだが ALSA Status: Stop
+
+## 発見: XROUND を抜くと B10Pro が動く
+
+- XROUND を USB から抜いた状態で B10Pro から音が出た
+- 両デバイスとも同じ USB バス (usb-0000:01:00.0) の full-speed デバイス
+- XROUND 接続中は pro-audio Sink が audio.channels=0 で壊れる
+- XROUND を抜くと正常なプロファイルが生成される（要検証）
+
+## 根本原因: USB 帯域不足
+
+dmesg で確認済み:
+  usb 1-1.1: Not enough bandwidth for new device state.
+  usb 1-1.1: Not enough bandwidth for altsetting 1〜4
+  usb 1-1.1: 1:2: usb_set_interface failed (-28)
+
+B10Pro が ALSA デバイスを占有している状態で XROUND を挿すと、
+XROUND の全 altsetting が帯域不足で失敗する (errno -28 = ENOSPC)。
+full-speed USB のアイソクロナス帯域上限に2台の USB Audio が収まらない。
+
+PipeWire/WirePlumber の問題ではなく、Linux USB スタックレベルで
+2台同時のアイソクロナス転送が許可されない。
+
+→ USB の不可解な現象は dmesg を確認すること
+
+## 残課題
+
+- full-speed USB 帯域の制約: 同一バスに2台の USB Audio は同時ストリーミング不可
+- USB ハブ構成の見直し（別バスに分離）で解決するか？
+- high-speed 対応の USB Audio デバイスなら帯域に余裕があるか？
+
+## 確実に動作する条件（セッション中に確認済み）
+
+- analog-stereo プロファイルが存在し、audio.channels=2 であること
+- pw-loopback -P <node_name> で ALSA が Running になること
+- B10Pro は S24_3LE のみ対応（PipeWire 経由なら自動変換）

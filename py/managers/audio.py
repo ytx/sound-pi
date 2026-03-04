@@ -363,8 +363,8 @@ class PipeWireManager:
 
     def ensure_sink_profile(self, pw_device_id: int, pw_device_name: str = "") -> str | None:
         """Ensure the PipeWire device has a Sink-capable profile.
-        Sets pro-audio (index 1) if current profile has no Sink.
-        Returns node_name of the Sink, or None on failure.
+        Tries each profile with Audio/Sink until one produces a working sink
+        (audio.channels > 0). Returns node_name or None.
         """
         # Check if a sink already exists for this device
         self.list_sinks()
@@ -372,27 +372,68 @@ class PipeWireManager:
         if existing:
             return existing
 
-        # No sink — switch to pro-audio profile (index 1)
-        log.info("switching device %d to pro-audio profile", pw_device_id)
-        try:
-            subprocess.run(
-                ["wpctl", "set-profile", str(pw_device_id), "1"],
-                timeout=5, check=True,
-            )
-        except Exception as e:
-            log.warning("set-profile failed for device %d: %s", pw_device_id, e)
+        # No sink — try each profile that has Audio/Sink
+        candidates = self._find_sink_profile_indices(pw_device_id)
+        if not candidates:
+            log.warning("no sink-capable profile for device %d", pw_device_id)
             return None
 
-        # Wait for sink to appear
-        for _ in range(10):
-            time.sleep(0.3)
-            self.list_sinks()
-            found = self._find_sink_for_device(pw_device_id)
-            if found:
-                log.info("sink appeared: %s", found)
-                return found
-        log.warning("sink did not appear for device %d", pw_device_id)
+        for profile_idx in candidates:
+            log.info("trying device %d profile index %d", pw_device_id, profile_idx)
+            try:
+                subprocess.run(
+                    ["wpctl", "set-profile", str(pw_device_id), str(profile_idx)],
+                    timeout=5, check=True,
+                )
+            except Exception as e:
+                log.warning("set-profile failed for device %d: %s", pw_device_id, e)
+                continue
+
+            # Wait for sink to appear
+            for _ in range(10):
+                time.sleep(0.3)
+                self.list_sinks()
+                found = self._find_sink_for_device(pw_device_id)
+                if found:
+                    log.info("sink found on profile %d: %s", profile_idx, found)
+                    return found
+
+            log.info("profile %d: no sink appeared, trying next", profile_idx)
+
+        log.warning("no sink found for device %d", pw_device_id)
         return None
+
+    @staticmethod
+    def _find_sink_profile_indices(pw_device_id: int) -> list[int]:
+        """Find all profile indices that include Audio/Sink for the device.
+        Returns indices sorted: non-pro-audio first (pro-audio is often broken).
+        """
+        try:
+            out = subprocess.check_output(
+                ["pw-cli", "enum-params", str(pw_device_id), "EnumProfile"],
+                timeout=5, text=True, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return []
+
+        pro_audio: list[int] = []
+        other: list[int] = []
+        blocks = re.split(r"^(?=\s*Object:)", out, flags=re.MULTILINE)
+        for block in blocks:
+            if "Audio/Sink" not in block:
+                continue
+            m = re.search(r"Profile:index.*?\n\s+Int\s+(\d+)", block)
+            if not m:
+                continue
+            idx = int(m.group(1))
+            if idx == 0:  # "off"
+                continue
+            if "pro-audio" in block:
+                pro_audio.append(idx)
+            else:
+                other.append(idx)
+        # Prefer non-pro-audio profiles (analog-stereo etc.)
+        return other + pro_audio
 
     def _find_sink_for_device(self, pw_device_id: int) -> str | None:
         """Find a sink belonging to a PipeWire device.
@@ -575,7 +616,7 @@ class PipeWireManager:
     def start_routing(self, targets: list[str] | None = None):
         """Start pw-loopback for each target node_name.
         If targets is None, reads from config output_devices.
-        If no targets configured, routes to default sink (single loopback).
+        Resolves node names and ensures sink profiles before starting.
         """
         source = self._find_uac2_source()
         if not source:
@@ -584,14 +625,46 @@ class PipeWireManager:
 
         if targets is None:
             devices = cfg.get("output_devices", [])
-            targets = [d["node_name"] for d in devices] if devices else []
-
-        if not targets:
-            log.info("routing: no output devices configured, no loopback started")
+            if not devices:
+                log.info("routing: no output devices configured, no loopback started")
+                return
+            # Pass 1: resolve all node names (may trigger profile switches)
+            config_changed = False
+            resolved_targets: list[str] = []
+            for d in devices:
+                node_name = d.get("node_name", "")
+                pw_device_name = d.get("pw_device_name", "")
+                # Verify node exists; if not, resolve via device
+                resolved = self.resolve_node_name(node_name)
+                if not resolved and pw_device_name:
+                    new_name = self._resolve_by_device_name(pw_device_name)
+                    if new_name and new_name != node_name:
+                        log.info("routing: node_name updated %s → %s", node_name, new_name)
+                        d["node_name"] = new_name
+                        node_name = new_name
+                        config_changed = True
+                resolved_targets.append(node_name)
+            if config_changed:
+                cfg.set("output_devices", devices)
+            # Allow PipeWire to stabilize after profile switches
+            time.sleep(1)
+            # Pass 2: start all loopbacks
+            for node_name in resolved_targets:
+                self._start_loopback(source, node_name, node_name)
+            if config_changed:
+                cfg.set("output_devices", devices)
             return
 
         for node_name in targets:
             self._start_loopback(source, node_name, node_name)
+
+    def _resolve_by_device_name(self, pw_device_name: str) -> str | None:
+        """Find a sink by PipeWire device name, ensuring profile if needed."""
+        pw_devs = self.list_pw_audio_devices()
+        for d in pw_devs:
+            if d["device_name"] == pw_device_name:
+                return self.ensure_sink_profile(d["id"], pw_device_name)
+        return None
 
     def _start_loopback(self, source: str, sink: str | None, key: str):
         """Start a single pw-loopback process."""
@@ -615,7 +688,8 @@ class PipeWireManager:
         except Exception as e:
             log.warning("loopback start failed (%s): %s", sink or "default", e)
 
-    def add_route(self, node_name: str) -> bool:
+    def add_route(self, node_name: str, card_name: str = "",
+                  pw_device_name: str = "") -> bool:
         """Add routing to a single sink. Returns True on success."""
         source = self._find_uac2_source()
         if not source:
