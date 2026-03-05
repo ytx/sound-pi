@@ -18,6 +18,7 @@ from managers.bluetooth import BluetoothManager
 from managers.gpio import (GpioManager, EVT_ROTATE_CW, EVT_ROTATE_CCW,
                            EVT_BUTTON_SHORT, EVT_BUTTON_LONG)
 from managers.hid import HidController
+from managers.media_input import MediaInputManager
 from screens.vu_meter import VuMeterScreen
 from screens.dual_vu_meter import DualVuMeterScreen
 from screens.spectrum import SpectrumScreen
@@ -71,6 +72,7 @@ class App:
         self._gpio = GpioManager()
         self._hid = HidController()
         self._bluetooth = BluetoothManager()
+        self._media_input = MediaInputManager()
 
         # Config
         config.load()
@@ -125,11 +127,15 @@ class App:
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
 
+        # Clear stale WirePlumber route cache before routing
+        self._clear_wireplumber_routes()
+
         # Start subsystems
         self._audio_capture.start()
         self._pipewire.start_routing()
         self._gpio.start()
         self._bluetooth.start()
+        self._media_input.start()
         self._screens[self._current_screen_id].on_enter()
 
         try:
@@ -137,6 +143,7 @@ class App:
                 dt = self._clock.tick(FPS) / 1000.0
                 self._process_events()
                 self._process_gpio()
+                self._process_media_input()
                 self._update(dt)
                 self._draw()
         except KeyboardInterrupt:
@@ -147,6 +154,17 @@ class App:
     def _signal_handler(self, signum, frame):
         log.info("signal %d received, shutting down", signum)
         self._running = False
+
+    def _clear_wireplumber_routes(self):
+        """Truncate WirePlumber default-routes to prevent stale profile selection."""
+        from pathlib import Path
+        routes_file = Path.home() / ".local/state/wireplumber/default-routes"
+        if routes_file.exists():
+            try:
+                routes_file.write_text("")
+                log.info("cleared wireplumber default-routes")
+            except OSError as e:
+                log.warning("could not clear default-routes: %s", e)
 
     def _process_events(self):
         # pygame events (for quit in window mode)
@@ -234,6 +252,42 @@ class App:
                     config.set("muted", self._muted)
                     self._mute_overlay.show(self._muted)
 
+    def _process_media_input(self):
+        self._media_input.maybe_rescan(interval=10.0)
+        mixer = self._screens["mixer"]
+        for event_name, device in self._media_input.poll():
+            if event_name == "play_pause":
+                self._hid.play_pause()
+            elif event_name == "next":
+                self._hid.next_track()
+            elif event_name == "prev":
+                self._hid.prev_track()
+            elif event_name in ("volume_up", "volume_down"):
+                slot = self._find_slot_for_device(mixer, device)
+                if slot and slot.wpctl_id:
+                    delta = (VOLUME_STEP / 100.0) if event_name == "volume_up" else -(VOLUME_STEP / 100.0)
+                    slot.volume = max(0.0, min(1.0, slot.volume + delta))
+                    self._pipewire.set_sink_volume(slot.wpctl_id, slot.volume)
+                    self._volume_overlay.show(int(slot.volume * 100))
+                    mixer.save_config()
+
+    def _find_slot_for_device(self, mixer, device):
+        """Match a MediaDevice to a Mixer OutputSlot via uniq/phys."""
+        for slot in mixer._slots:
+            if not slot.node_name or not slot._pw_device_name:
+                continue
+            # USB: uniq (serial) is contained in pw_device_name
+            if device.uniq and device.uniq in slot._pw_device_name:
+                return slot
+            # BT: extract BT addr from node_name, match against device name/uniq
+            if slot.node_name.startswith("bluez_output."):
+                bt_addr = slot.node_name.replace("bluez_output.", "").split(".")[0]
+                if bt_addr:
+                    bt_addr_colon = bt_addr.replace("_", ":")
+                    if bt_addr in device.name or bt_addr_colon in device.uniq:
+                        return slot
+        return None
+
     def _update(self, dt: float):
         screen = self._screens.get(self._current_screen_id)
         if screen:
@@ -262,6 +316,7 @@ class App:
         self._pipewire.stop_routing()
         self._gpio.stop()
         self._bluetooth.stop()
+        self._media_input.stop()
         self._hid.close()
         self._touch.close()
         self._display.close()

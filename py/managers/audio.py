@@ -671,17 +671,16 @@ class PipeWireManager:
                 cfg.set("output_devices", devices)
             # Allow PipeWire to stabilize after profile switches
             time.sleep(1)
-            # Pass 2: start all loopbacks
+            # Pass 2: start loopbacks and apply volume/mute immediately
+            dev_by_name = {d.get("node_name", ""): d for d in devices}
             for node_name in resolved_targets:
                 self._start_loopback(source, node_name, node_name)
-            # Pass 3: apply saved volume/mute to each sink
-            time.sleep(0.5)
-            for d in devices:
-                node_name = d.get("node_name", "")
-                wpctl_id = self.resolve_node_name(node_name)
-                if wpctl_id:
-                    self.set_sink_volume(wpctl_id, d.get("volume", 0.8))
-                    self.set_sink_mute(wpctl_id, d.get("muted", False))
+                d = dev_by_name.get(node_name, {})
+                self._apply_sink_volume(
+                    node_name,
+                    d.get("volume", 0.8),
+                    d.get("muted", False),
+                )
             if config_changed:
                 cfg.set("output_devices", devices)
             return
@@ -719,8 +718,28 @@ class PipeWireManager:
         except Exception as e:
             log.warning("loopback start failed (%s): %s", sink or "default", e)
 
+    def _apply_sink_volume(self, node_name: str, volume: float, muted: bool,
+                           retries: int = 5, delay: float = 0.2):
+        """Apply volume/mute to a sink, retrying until wpctl_id is available.
+
+        pw-loopback takes a moment to register the sink node, so we retry
+        a few times with a short delay.
+        """
+        for i in range(retries):
+            wpctl_id = self.resolve_node_name(node_name)
+            if wpctl_id:
+                self.set_sink_volume(wpctl_id, volume)
+                self.set_sink_mute(wpctl_id, muted)
+                log.info("sink volume applied: %s (id=%d) vol=%.2f muted=%s",
+                         node_name, wpctl_id, volume, muted)
+                return
+            time.sleep(delay)
+        log.warning("sink volume: could not resolve %s after %d retries",
+                    node_name, retries)
+
     def add_route(self, node_name: str, card_name: str = "",
-                  pw_device_name: str = "") -> bool:
+                  pw_device_name: str = "",
+                  volume: float = 0.8, muted: bool = False) -> bool:
         """Add routing to a single sink. Returns True on success."""
         source = self._find_uac2_source()
         if not source:
@@ -730,6 +749,8 @@ class PipeWireManager:
         if "__default__" in self._loopback_procs:
             self._stop_loopback("__default__")
         self._start_loopback(source, node_name, node_name)
+        if node_name in self._loopback_procs:
+            self._apply_sink_volume(node_name, volume, muted)
         return node_name in self._loopback_procs
 
     def remove_route(self, node_name: str):

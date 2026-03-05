@@ -53,6 +53,7 @@ LCD表示
 - **タッチ**: `/dev/input/eventN` (ADS7846, evdev直読み, 0-4095 → 480x320 マッピング)
 - **ロータリーエンコーダ**: libgpiod v2 `gpiomon` (CLK=19, DT=20, SW=26, pull-up)
 - **USB HID出力**: `/dev/hidg0` (Play/Pause, Next, Prev)
+- **メディアキー入力**: evdev Consumer Control / BT AVRCP (`/dev/input/eventN`) — 出力デバイスからのボタン操作受信
 
 ## 画面遷移
 
@@ -63,6 +64,8 @@ LCD表示
 ロータリー回転 → 選択デバイスの音量変更 + VolumeOverlay（デバイス未設定時はマスター音量）
 ロータリー短押し → Play/Pause (USB HID)
 ロータリー長押し → 選択デバイスのMute切替（デバイス未設定時はマスターMute）
+出力デバイスの Play/Pause/Next/Prev → PC へ HID 転送
+出力デバイスの Volume Up/Down → 該当 Mixer スロットの音量調整 (5%刻み)
 ```
 
 ## 重要な注意点
@@ -118,6 +121,34 @@ LCD表示
 - **アプリの `ensure_sink_profile`** が pro-audio (index 1) に切り替えるが、pro-audio の Sink は `audio.channels=0`、EnumFormat 空で壊れている
 - **セッション中の手動操作**（プロファイル切替、WirePlumber 再起動等）を繰り返すと `analog-stereo` プロファイルが出現して動作するが、どの操作が決め手かは未特定
 - **EnumProfile**: off(0), pro-audio(1), input:mono-fallback(2) の3つのみ。`analog-stereo` は EnumProfile に存在しないが、特定条件下で出現する
+
+### メディアキー入力 (MediaInputManager)
+- **`py/managers/media_input.py`**: evdev Consumer Control / BT AVRCP デバイスからのメディアキー受信
+- **デバイス検出**: `/proc/bus/input/devices` をパース、"Consumer Control" または "(AVRCP)" を含むデバイスを検出（ADS7846 は除外）
+- **EVIOCGRAB**: デバイスを排他取得 — WirePlumber が同じイベントを処理して音量を二重変更するのを防止
+- **デバウンス**: 同一デバイス・同一キーの連打を 300ms 間隔でデバウンス（B10Pro は1回の押下で value=1 イベントを複数回送信する）
+- **インクリメンタル rescan**: 10秒間隔で新規デバイスのみ追加（既存 fd は維持）。全 close→reopen するとイベント消失する
+- **デバイス → Mixer スロットのマッチング**:
+  - USB: evdev の `Uniq`（シリアル番号）が `pw_device_name` に含まれるか
+  - BT: `bluez_output.XX_XX_XX_XX_XX_XX` からBTアドレスを抽出し、evdev の `Name` / `Uniq` とマッチ
+- **イベント処理**: Play/Pause/Next/Prev → `/dev/hidg0` で PC へ転送、Volume Up/Down → 該当スロットの音量 ±5%
+
+### USB HID ガジェット (`/dev/hidg0`)
+- **レポートディスクリプタ**: 1バイトのビットフィールド（bit0=Play/Pause, bit1=Next, bit2=Prev）
+- **絶対に 2バイトの Usage ID (`0xCD00` 等) を送らない** — ビットフィールドなので `0xCD` は複数ビットがセットされ、Play/Pause と Prev が同時送信される
+- **正しいレポート値**: Play/Pause=`0x01`, Next=`0x02`, Prev=`0x04`, Release=`0x00`
+- **O_NONBLOCK + EAGAIN リトライ**: PC がレポートを読み切るまで write が EAGAIN を返す → 5ms 間隔で最大3回リトライ
+- **パーミッション**: デフォルト `crw------- root:root` → `usb-gadget-setup.sh` で `chmod 666` を実行
+
+### WirePlumber default-routes
+- **起動時クリア**: `~/.local/state/wireplumber/default-routes` をアプリ起動時に truncate（`start_routing()` の前）
+- WirePlumber が古いルート情報をキャッシュし、リブート後に不正なプロファイル（`input:mono-fallback` 等）を選択する問題への対策
+- overlay FS 環境でも Ansible デプロイ中に WirePlumber が動作していると stale なエントリが残る
+
+### pw-loopback 音量バースト防止
+- **問題**: `pw-loopback` 起動直後は PipeWire デフォルト (100%) で音が流れ、その後の `set_sink_volume` まで最大音量になる
+- **対策**: `_apply_sink_volume()` で loopback 起動直後に即座に音量設定。wpctl_id が resolve されるまで 200ms 間隔で最大5回リトライ
+- `start_routing()` / `add_route()` 両方で loopback 起動と音量設定をセットで実行
 
 ### 設定永続化 (config-persistence)
 - 設定ファイル: `~/.config/sound-pi/config.json`

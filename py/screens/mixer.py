@@ -129,7 +129,9 @@ class MixerScreen(Screen):
                                 config_changed = True
                                 # Update routing if active
                                 self._pw.remove_route(old)
-                                self._pw.add_route(node_name)
+                                self._pw.add_route(node_name,
+                                                   volume=slot.volume,
+                                                   muted=slot.muted)
                                 log.info("node_name updated: %s → %s", old, node_name)
                             wpctl_id = self._pw.resolve_node_name(node_name) if node_name else None
                             break
@@ -376,9 +378,8 @@ class MixerScreen(Screen):
         slot._card_name = dev.get("card_name", "")
 
         self._pw.add_route(node_name, card_name=slot._card_name,
-                           pw_device_name=pw_device_name)
-        if slot.wpctl_id:
-            self._pw.set_sink_volume(slot.wpctl_id, slot.volume)
+                           pw_device_name=pw_device_name,
+                           volume=slot.volume, muted=slot.muted)
         self.save_config()
         persist_config()
         log.info("added output: %s (%s) → slot %d", nick, node_name, self._selected)

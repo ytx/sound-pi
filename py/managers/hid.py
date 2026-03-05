@@ -1,20 +1,29 @@
-"""USB HID Consumer Control output via /dev/hidg0."""
+"""USB HID Consumer Control output via /dev/hidg0.
+
+Report descriptor (1-byte bitmap):
+  bit 0: Play/Pause
+  bit 1: Scan Next Track
+  bit 2: Scan Previous Track
+  bits 3-7: padding (const)
+"""
 
 import os
+import time
 from logger import get_logger
 
 log = get_logger("hid")
 
 HID_DEVICE = "/dev/hidg0"
 
-# Consumer Control usage IDs (2 bytes, little-endian)
-KEY_PLAY_PAUSE = b"\xcd\x00"
-KEY_NEXT = b"\xb5\x00"
-KEY_PREV = b"\xb6\x00"
-KEY_VOLUME_UP = b"\xe9\x00"
-KEY_VOLUME_DOWN = b"\xea\x00"
-KEY_MUTE = b"\xe2\x00"
-KEY_RELEASE = b"\x00\x00"
+# 1-byte bitmap reports matching the gadget report descriptor
+KEY_PLAY_PAUSE = b"\x01"   # bit 0
+KEY_NEXT = b"\x02"         # bit 1
+KEY_PREV = b"\x04"         # bit 2
+KEY_RELEASE = b"\x00"
+
+# Max retries for EAGAIN on non-blocking write
+_WRITE_RETRIES = 3
+_WRITE_RETRY_DELAY = 0.005  # 5ms
 
 
 class HidController:
@@ -35,15 +44,27 @@ class HidController:
             log.info("HID device not found — stub mode")
             self._stub = True
 
+    def _write_retry(self, data: bytes):
+        """Write to HID fd, retrying on EAGAIN."""
+        for i in range(_WRITE_RETRIES):
+            try:
+                os.write(self._fd, data)
+                return True
+            except BlockingIOError:
+                time.sleep(_WRITE_RETRY_DELAY)
+            except Exception as e:
+                log.warning("HID write failed: %s", e)
+                return False
+        log.warning("HID write failed: EAGAIN after %d retries", _WRITE_RETRIES)
+        return False
+
     def _send(self, key: bytes):
         if self._stub:
             log.debug("stub HID: %s", key.hex())
             return
-        try:
-            os.write(self._fd, key)
-            os.write(self._fd, KEY_RELEASE)
-        except Exception as e:
-            log.warning("HID write failed: %s", e)
+        if self._write_retry(key):
+            time.sleep(_WRITE_RETRY_DELAY)
+            self._write_retry(KEY_RELEASE)
 
     def play_pause(self):
         self._send(KEY_PLAY_PAUSE)
