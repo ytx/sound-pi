@@ -48,6 +48,8 @@ class OutputSlot:
 class MixerScreen(Screen):
     name = "mixer"
 
+    POLL_INTERVAL = 3.0  # seconds between sink polls
+
     def __init__(self, pipewire_mgr):
         self._pw = pipewire_mgr
         self._slots: list[OutputSlot] = [OutputSlot() for _ in range(MAX_SLOTS)]
@@ -55,6 +57,7 @@ class MixerScreen(Screen):
         self._adding: bool = False
         self._available_sinks: list[dict] = []
         self._dragging_slot: int | None = None
+        self._poll_timer: float = 0
 
     def on_enter(self):
         """Load config and resolve wpctl IDs."""
@@ -71,6 +74,37 @@ class MixerScreen(Screen):
             else:
                 self._slots[i] = OutputSlot()
         self._resolve_ids()
+
+    def update(self, dt: float):
+        self._poll_timer -= dt
+        if self._poll_timer > 0:
+            return
+        self._poll_timer = self.POLL_INTERVAL
+        self._poll_sinks()
+
+    def _poll_sinks(self):
+        """Re-resolve wpctl_ids and apply volume/mute for newly appeared sinks."""
+        self._pw.list_sinks()
+        for slot in self._slots:
+            if not slot.node_name:
+                continue
+            old_id = slot.wpctl_id
+            new_id = self._pw.resolve_node_name(slot.node_name)
+            if new_id and new_id != old_id:
+                # Device just appeared or ID changed
+                slot.wpctl_id = new_id
+                self._pw.set_sink_volume(new_id, slot.volume)
+                self._pw.set_sink_mute(new_id, slot.muted)
+                # Update nick from sink cache
+                for s in self._pw._sinks_cache:
+                    if s["node_name"] == slot.node_name:
+                        slot.nick = s.get("nick") or s.get("description", "")[:10]
+                        break
+                log.info("sink resolved: %s → wpctl_id=%d", slot.node_name, new_id)
+            elif not new_id and old_id:
+                # Device disappeared
+                slot.wpctl_id = None
+                log.info("sink lost: %s", slot.node_name)
 
     def _resolve_ids(self):
         """Resolve node_name → wpctl_id for all active slots.
