@@ -30,6 +30,7 @@ EVT_BUTTON_SHORT = "button_short"
 EVT_BUTTON_LONG = "button_long"
 
 LONG_PRESS_MS = 600
+ENCODER_DEBOUNCE_S = 0.005  # 5ms — ignore rotation events within this interval
 
 
 class GpioManager:
@@ -93,6 +94,7 @@ class GpioManager:
         """Parse gpiomon v2 output: '<offset> <edge_type>'
         edge_type: 1=rising, 2=falling
         """
+        last_event_time = 0.0
         while self._running and self._encoder_proc:
             line = self._encoder_proc.stdout.readline()
             if not line:
@@ -111,11 +113,15 @@ class GpioManager:
             self.pin_states[offset] = pin_val
 
             if offset == CLK_PIN and edge == 2:  # falling
+                now = time.monotonic()
+                if now - last_event_time < ENCODER_DEBOUNCE_S:
+                    continue
                 dt_val = self.pin_states.get(DT_PIN)
                 if dt_val is not None:
                     evt = EVT_ROTATE_CW if dt_val == 1 else EVT_ROTATE_CCW
                     with self._lock:
                         self._events.append(evt)
+                    last_event_time = now
 
     def _start_button(self):
         """Monitor rotary encoder switch (libgpiod v2)."""

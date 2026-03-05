@@ -1,6 +1,7 @@
 """Output control screen — multi-device routing with per-device volume."""
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 import pygame
 
@@ -26,12 +27,16 @@ SLIDER_H = 150
 SLIDER_W = 40
 PERCENT_Y = 224
 MUTE_Y = 246
-REMOVE_Y = 272
+MUTE_H = 45
 # Add-device overlay
 OVERLAY_X = 40
 OVERLAY_Y = 40
 OVERLAY_W = 400
 OVERLAY_ROW_H = 50
+
+# Long-press / confirm timing
+MUTE_LONG_PRESS_MS = 500
+CONFIRM_TIMEOUT = 2.0
 
 
 @dataclass
@@ -43,6 +48,7 @@ class OutputSlot:
     muted: bool = False
     _pw_device_name: str = ""
     _card_name: str = ""
+    volume_step: int = 1  # 1 or 5 (%), volatile — not persisted
 
 
 class MixerScreen(Screen):
@@ -56,8 +62,13 @@ class MixerScreen(Screen):
         self._selected: int = 0
         self._adding: bool = False
         self._available_sinks: list[dict] = []
-        self._dragging_slot: int | None = None
         self._poll_timer: float = 0
+        # Mute long-press state
+        self._mute_press_time: float | None = None
+        self._mute_press_slot: int | None = None
+        # Delete confirmation state
+        self._confirm_remove_slot: int | None = None
+        self._confirm_remove_timer: float = 0
 
     def on_enter(self):
         """Load config and resolve wpctl IDs."""
@@ -76,6 +87,22 @@ class MixerScreen(Screen):
         self._resolve_ids()
 
     def update(self, dt: float):
+        # Mute long-press detection
+        if self._mute_press_time is not None:
+            elapsed = (time.monotonic() - self._mute_press_time) * 1000
+            if elapsed >= MUTE_LONG_PRESS_MS:
+                idx = self._mute_press_slot
+                self._mute_press_time = None
+                self._mute_press_slot = None
+                self._confirm_remove_slot = idx
+                self._confirm_remove_timer = CONFIRM_TIMEOUT
+
+        # Confirm removal timeout
+        if self._confirm_remove_slot is not None:
+            self._confirm_remove_timer -= dt
+            if self._confirm_remove_timer <= 0:
+                self._confirm_remove_slot = None
+
         self._poll_timer -= dt
         if self._poll_timer > 0:
             return
@@ -192,9 +219,9 @@ class MixerScreen(Screen):
         is_selected = (idx == self._selected)
         border_color = CYAN if is_selected else GRAY
 
-        # Slot border
+        # Slot border (reduced height: no remove button row)
         pygame.draw.rect(surface, border_color,
-                         (x - 2, NICK_Y - 4, SLOT_WIDTH + 4, 280), 1, border_radius=4)
+                         (x - 2, NICK_Y - 4, SLOT_WIDTH + 4, MUTE_Y + MUTE_H - NICK_Y + 8), 1, border_radius=4)
 
         if not slot.node_name:
             # Empty slot — show "+" to indicate tappable
@@ -212,19 +239,24 @@ class MixerScreen(Screen):
         draw_vslider(surface, slider_x, SLIDER_Y, SLIDER_W, SLIDER_H,
                      slot.volume, muted=slot.muted)
 
-        # Percentage
+        # Percentage + volume step indicator
         pct = f"{int(slot.volume * 100)}%"
+        if is_selected:
+            pct += f" x{slot.volume_step}"
         draw_text(surface, pct, x + SLOT_WIDTH // 2, PERCENT_Y,
                   GRAY if slot.muted else WHITE, 14, center=True)
 
-        # Mute button
-        mute_color = RED if slot.muted else GRAY
-        pygame.draw.rect(surface, mute_color, (x + 20, MUTE_Y, 60, 20), border_radius=3)
-        draw_text(surface, "M", x + SLOT_WIDTH // 2, MUTE_Y + 10, WHITE, 14, center=True)
-
-        # Remove button
-        pygame.draw.rect(surface, DARK_GRAY, (x + 20, REMOVE_Y, 60, 16), border_radius=3)
-        draw_text(surface, "x", x + SLOT_WIDTH // 2, REMOVE_Y + 8, RED, 13, center=True)
+        # Mute button / Remove confirmation
+        if self._confirm_remove_slot == idx:
+            # Delete confirmation state
+            pygame.draw.rect(surface, RED, (x + 10, MUTE_Y, 80, MUTE_H), border_radius=3)
+            draw_text(surface, "Remove?", x + SLOT_WIDTH // 2, MUTE_Y + MUTE_H // 2,
+                      WHITE, 14, center=True)
+        else:
+            mute_color = RED if slot.muted else GRAY
+            pygame.draw.rect(surface, mute_color, (x + 20, MUTE_Y, 60, MUTE_H), border_radius=3)
+            draw_text(surface, "M", x + SLOT_WIDTH // 2, MUTE_Y + MUTE_H // 2,
+                      WHITE, 14, center=True)
 
     def _draw_add_overlay(self, surface: pygame.Surface):
         """Draw the device-add overlay."""
@@ -263,7 +295,19 @@ class MixerScreen(Screen):
             return
 
         if event_type == "down":
-            self._dragging_slot = None
+            # Check if confirm-remove is active and handle tap
+            if self._confirm_remove_slot is not None:
+                cidx = self._confirm_remove_slot
+                cx = SLOT_X_START + cidx * SLOT_X_GAP
+                if (cx + 10 <= x <= cx + 90 and MUTE_Y <= y <= MUTE_Y + MUTE_H):
+                    # Confirm tap on "Remove?" button
+                    self._confirm_remove_slot = None
+                    self._remove_device(cidx)
+                    return
+                else:
+                    # Tap elsewhere → cancel confirmation
+                    self._confirm_remove_slot = None
+                    return
 
             # Per-slot touches
             for i in range(MAX_SLOTS):
@@ -276,49 +320,33 @@ class MixerScreen(Screen):
                         self._open_add_overlay()
                         return
 
-                    # Mute button
-                    if sx + 20 <= x <= sx + 80 and MUTE_Y <= y <= MUTE_Y + 20:
+                    # Mute button area — start long-press detection
+                    if sx + 20 <= x <= sx + 80 and MUTE_Y <= y <= MUTE_Y + MUTE_H:
+                        self._mute_press_time = time.monotonic()
+                        self._mute_press_slot = i
+                        return
+
+                    # Anywhere else in slot → select / toggle step
+                    if i == self._selected:
+                        slot.volume_step = 5 if slot.volume_step == 1 else 1
+                    else:
+                        self._selected = i
+                        slot.volume_step = 1
+                    return
+
+        elif event_type == "up":
+            # Mute button release before long-press threshold → toggle mute
+            if self._mute_press_time is not None:
+                idx = self._mute_press_slot
+                self._mute_press_time = None
+                self._mute_press_slot = None
+                if idx is not None:
+                    slot = self._slots[idx]
+                    if slot.node_name:
                         slot.muted = not slot.muted
                         if slot.wpctl_id:
                             self._pw.set_sink_mute(slot.wpctl_id, slot.muted)
                         self.save_config()
-                        return
-
-                    # Remove button
-                    if sx + 20 <= x <= sx + 80 and REMOVE_Y <= y <= REMOVE_Y + 16:
-                        self._remove_device(i)
-                        return
-
-                    # Slider area — start drag
-                    slider_x = sx + (SLOT_WIDTH - SLIDER_W) // 2
-                    if slider_x <= x <= slider_x + SLIDER_W and SLIDER_Y <= y <= SLIDER_Y + SLIDER_H:
-                        self._selected = i
-                        self._dragging_slot = i
-                        self._apply_slider_touch(i, y)
-                        return
-
-                    # Anywhere else in slot → select
-                    self._selected = i
-                    return
-
-        elif event_type == "move":
-            if self._dragging_slot is not None:
-                self._apply_slider_touch(self._dragging_slot, y)
-
-        elif event_type == "up":
-            self._dragging_slot = None
-
-    def _apply_slider_touch(self, idx: int, y: int):
-        """Map touch y to volume and apply."""
-        slot = self._slots[idx]
-        if not slot.node_name:
-            return
-        # y=SLIDER_Y → volume 1.0, y=SLIDER_Y+SLIDER_H → volume 0.0
-        ratio = 1.0 - (y - SLIDER_Y) / SLIDER_H
-        slot.volume = max(0.0, min(1.0, ratio))
-        if slot.wpctl_id:
-            self._pw.set_sink_volume(slot.wpctl_id, slot.volume)
-        self.save_config()
 
     def _handle_add_touch(self, x: int, y: int):
         """Handle touch inside add-device overlay."""

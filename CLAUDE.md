@@ -61,11 +61,11 @@ LCD表示
 起動 → VuMeter（デフォルト）
 左上100x100タップ → メインメニュー（3×2タイル: VU/DualVU/Spectrum/Mixer）
 右上100x100タップ → 設定メニュー（3×2タイル: System/BT/WiFi/Develop）
-ロータリー回転 → 選択デバイスの音量変更 + VolumeOverlay（デバイス未設定時はマスター音量）
+ロータリー回転 → 選択デバイスの音量変更 + VolumeOverlay（倍率 x1=1%刻み / x5=5%刻み、デバイス未設定時はマスター音量 5%刻み）
 ロータリー短押し → Play/Pause (USB HID)
 ロータリー長押し → 選択デバイスのMute切替（デバイス未設定時はマスターMute）
 出力デバイスの Play/Pause/Next/Prev → PC へ HID 転送
-出力デバイスの Volume Up/Down → 該当 Mixer スロットの音量調整 (5%刻み)
+出力デバイスの Volume Up/Down → 該当 Mixer スロットの音量調整（倍率に応じた刻み）
 ```
 
 ## 重要な注意点
@@ -88,6 +88,7 @@ LCD表示
 - gpiomon 出力: `<offset> <edge_type>` (1=rising, 2=falling)
 - gpioget 出力: `"19"=active` / `"19"=inactive`
 - gpiomon がピンを占有中は gpioget で同じピンを読めない → `pin_states` dict でイベントから追跡
+- **ロータリーエンコーダのソフトウェアデバウンス**: CLK falling edge 間隔 5ms 未満のイベントを無視（`ENCODER_DEBOUNCE_S = 0.005`）。ハードウェアコンデンサと併用
 - LED hardware PWM: pin13 = PWM0_1 → **channel 1** (`pwm1`)、`dtoverlay=pwm,pin=13,func=4` が必要
 - PWM周波数: **200kHz** (5000ns period) — 1kHz だとオーディオにノイズが乗る
 - PWM export 後の udev 権限待ち: `os.access(period_path, os.W_OK)` のリトライループが必要
@@ -126,7 +127,7 @@ LCD表示
 - **`py/managers/media_input.py`**: evdev Consumer Control / BT AVRCP デバイスからのメディアキー受信
 - **デバイス検出**: `/proc/bus/input/devices` をパース、"Consumer Control" または "(AVRCP)" を含むデバイスを検出（ADS7846 は除外）
 - **EVIOCGRAB**: デバイスを排他取得 — WirePlumber が同じイベントを処理して音量を二重変更するのを防止
-- **デバウンス**: 同一デバイス・同一キーの連打を 300ms 間隔でデバウンス（B10Pro は1回の押下で value=1 イベントを複数回送信する）
+- **デバウンス**: 同一デバイス・同一キーの連打を 500ms 間隔でデバウンス（B10Pro は1回の押下で約300ms間 value=1 イベントを連射するため、300ms では不足）
 - **インクリメンタル rescan**: 10秒間隔で新規デバイスのみ追加（既存 fd は維持）。全 close→reopen するとイベント消失する
 - **デバイス → Mixer スロットのマッチング**:
   - USB: evdev の `Uniq`（シリアル番号）が `pw_device_name` に含まれるか
@@ -173,14 +174,19 @@ LCD表示
 ├──────────┬──────────┬──────────┬──────────┬────┤
 │  XROUND  │  B10Pro  │    +     │    +     │    │  ← 空スロットタップで追加
 │  ┃████┃  │  ┃████┃  │          │          │    │
-│  ┃████┃  │  ┃██  ┃  │          │          │    │  ← 縦スライダー(タッチドラッグ)
-│   75%    │   50%    │          │          │    │
-│   [M]    │   [M]    │          │          │    │  ← ミュートボタン
-│   [×]    │   [×]    │          │          │    │  ← 削除ボタン
+│  ┃████┃  │  ┃██  ┃  │          │          │    │  ← 縦スライダー(表示のみ)
+│  75% x1  │   50%    │          │          │    │  ← 選択中は倍率表示
+│   [M]    │   [M]    │          │          │    │  ← ミュートボタン(長押しで削除)
 └──────────┴──────────┴──────────┴──────────┴────┘
 ```
 
 - 4スロット固定、選択中スロットはシアン枠（ロータリーエンコーダのターゲット）
+- **スロットタップ**: 別スロット → 選択変更（倍率 x1 にリセット）、同じスロット → 倍率 x1↔x5 トグル
+- **倍率 `volume_step`**: 1 (1%刻み) or 5 (5%刻み)。揮発（config に保存しない）
+- **ミュートボタン短タップ** → ミュート切替
+- **ミュートボタン長押し** (500ms) → "Remove?" 赤背景表示 → 再タップで削除、他タップ or 2秒経過でキャンセル
+- スライダーのタッチドラッグ操作は廃止（ロータリーエンコーダで操作）
+- 削除ボタンは廃止（ミュートボタン長押しに統合）
 - 空スロットタップ → デバイス一覧オーバーレイ（ALSA + BT）→ デバイス追加
 - config 保存形式: `output_devices: [{node_name, pw_device_name, card_name, nick, volume, muted}, ...]`
 

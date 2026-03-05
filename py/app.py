@@ -221,7 +221,8 @@ class App:
             if evt in (EVT_ROTATE_CW, EVT_ROTATE_CCW):
                 slot = mixer.get_selected_slot()
                 if slot and slot.wpctl_id:
-                    delta = (VOLUME_STEP / 100.0) if evt == EVT_ROTATE_CW else -(VOLUME_STEP / 100.0)
+                    step = slot.volume_step  # 1 or 5
+                    delta = (step / 100.0) if evt == EVT_ROTATE_CW else -(step / 100.0)
                     slot.volume = max(0.0, min(1.0, slot.volume + delta))
                     self._pipewire.set_sink_volume(slot.wpctl_id, slot.volume)
                     self._volume_overlay.show(int(slot.volume * 100))
@@ -265,7 +266,8 @@ class App:
             elif event_name in ("volume_up", "volume_down"):
                 slot = self._find_slot_for_device(mixer, device)
                 if slot and slot.wpctl_id:
-                    delta = (VOLUME_STEP / 100.0) if event_name == "volume_up" else -(VOLUME_STEP / 100.0)
+                    step = slot.volume_step  # 1 or 5
+                    delta = (step / 100.0) if event_name == "volume_up" else -(step / 100.0)
                     slot.volume = max(0.0, min(1.0, slot.volume + delta))
                     self._pipewire.set_sink_volume(slot.wpctl_id, slot.volume)
                     self._volume_overlay.show(int(slot.volume * 100))

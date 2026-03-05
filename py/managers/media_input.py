@@ -47,7 +47,7 @@ class MediaDevice:
 
 
 # Minimum interval (seconds) between same key events from same device
-DEBOUNCE_INTERVAL = 0.3
+DEBOUNCE_INTERVAL = 0.5
 
 
 class MediaInputManager:
@@ -94,6 +94,7 @@ class MediaInputManager:
                         debounce_key = (dev.event_path, code)
                         last = self._last_event.get(debounce_key, 0.0)
                         if now - last < DEBOUNCE_INTERVAL:
+                            log.debug("debounced: %s code=%d dt=%.3fs", dev.event_path, code, now - last)
                             continue
                         self._last_event[debounce_key] = now
                         event_name = CODE_TO_EVENT[code]
