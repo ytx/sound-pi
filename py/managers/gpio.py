@@ -29,8 +29,8 @@ EVT_ROTATE_CCW = "rotate_ccw"
 EVT_BUTTON_SHORT = "button_short"
 EVT_BUTTON_LONG = "button_long"
 
-LONG_PRESS_MS = 600
 ENCODER_DEBOUNCE_S = 0.005  # 5ms — ignore rotation events within this interval
+BUTTON_DEBOUNCE_S = 0.05   # 50ms — ignore button edges within this interval
 
 
 class GpioManager:
@@ -146,8 +146,11 @@ class GpioManager:
     def _button_loop(self):
         """Parse gpiomon v2 output for button press/release.
         edge_type: 1=rising, 2=falling
+        Debounce: ignore edges within BUTTON_DEBOUNCE_S of the previous edge.
+        Emit EVT_BUTTON_SHORT on rising (release) only.
         """
         press_time = None
+        last_edge_time = 0.0
         while self._running and self._button_proc:
             line = self._button_proc.stdout.readline()
             if not line:
@@ -159,16 +162,20 @@ class GpioManager:
                 edge = int(parts[1])
             except (ValueError, IndexError):
                 continue
+
+            now = time.monotonic()
+            if now - last_edge_time < BUTTON_DEBOUNCE_S:
+                continue
+            last_edge_time = now
+
             # Track pin state
             self.pin_states[SW_PIN] = 1 if edge == 1 else 0
 
             if edge == 2:  # falling = press
-                press_time = time.monotonic()
+                press_time = now
             elif edge == 1 and press_time is not None:  # rising = release
-                duration_ms = (time.monotonic() - press_time) * 1000
-                evt = EVT_BUTTON_LONG if duration_ms >= LONG_PRESS_MS else EVT_BUTTON_SHORT
                 with self._lock:
-                    self._events.append(evt)
+                    self._events.append(EVT_BUTTON_SHORT)
                 press_time = None
 
     def _read_pin(self, pin: int) -> int | None:

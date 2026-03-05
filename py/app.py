@@ -16,7 +16,7 @@ from touch import Touch, TOUCH_DOWN, TOUCH_UP, TOUCH_MOVE
 from managers.audio import AudioCapture, PipeWireManager
 from managers.bluetooth import BluetoothManager
 from managers.gpio import (GpioManager, EVT_ROTATE_CW, EVT_ROTATE_CCW,
-                           EVT_BUTTON_SHORT, EVT_BUTTON_LONG)
+                           EVT_BUTTON_SHORT)
 from managers.hid import HidController
 from managers.media_input import MediaInputManager
 from screens.vu_meter import VuMeterScreen
@@ -225,8 +225,8 @@ class App:
                     delta = (step / 100.0) if evt == EVT_ROTATE_CW else -(step / 100.0)
                     slot.volume = max(0.0, min(1.0, slot.volume + delta))
                     self._pipewire.set_sink_volume(slot.wpctl_id, slot.volume)
-                    self._volume_overlay.show(int(slot.volume * 100))
-                    self._gpio.set_led_brightness(slot.volume)
+                    if self._current_screen_id != "mixer":
+                        self._volume_overlay.show(int(slot.volume * 100))
                     mixer.save_config()
                 else:
                     # No device selected — fallback to master volume
@@ -236,22 +236,18 @@ class App:
                         self._volume = max(0, self._volume - VOLUME_STEP)
                     self._pipewire.set_volume(self._volume)
                     config.set("master_volume", self._volume)
-                    self._volume_overlay.show(self._volume)
-                    self._gpio.set_led_brightness(self._volume / 100.0)
+                    if self._current_screen_id != "mixer":
+                        self._volume_overlay.show(self._volume)
             elif evt == EVT_BUTTON_SHORT:
-                self._hid.play_pause()
-            elif evt == EVT_BUTTON_LONG:
-                slot = mixer.get_selected_slot()
-                if slot and slot.wpctl_id:
-                    slot.muted = not slot.muted
-                    self._pipewire.set_sink_mute(slot.wpctl_id, slot.muted)
-                    self._mute_overlay.show(slot.muted)
-                    mixer.save_config()
+                if self._current_screen_id == "mixer":
+                    slot = mixer.get_selected_slot()
+                    if slot and slot.wpctl_id:
+                        slot.muted = not slot.muted
+                        self._pipewire.set_sink_mute(slot.wpctl_id, slot.muted)
+                        self._mute_overlay.show(slot.muted)
+                        mixer.save_config()
                 else:
-                    self._muted = not self._muted
-                    self._pipewire.set_mute(self._muted)
-                    config.set("muted", self._muted)
-                    self._mute_overlay.show(self._muted)
+                    self._switch_screen("mixer")
 
     def _process_media_input(self):
         self._media_input.maybe_rescan(interval=10.0)
@@ -296,6 +292,10 @@ class App:
             screen.update(dt)
         self._volume_overlay.update(dt)
         self._mute_overlay.update(dt)
+
+        # LED brightness follows UAC2 input audio level
+        level = max(self._audio_capture.level_l, self._audio_capture.level_r)
+        self._gpio.set_led_brightness(level)
 
     def _draw(self):
         surface = self._display.surface

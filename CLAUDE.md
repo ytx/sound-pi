@@ -11,7 +11,7 @@ PC/Mac からの USB Audio (UAC2 ガジェット) 入力を受け取り、最大
 - **numpy** — FFT（スペクトラムアナライザ）
 - **PipeWire** — `wpctl` (ボリューム制御)、`pw-cat` (オーディオキャプチャ)、`pw-loopback` (ルーティング)
 - **libgpiod v2** (`gpiomon`/`gpioget`) — ロータリーエンコーダ読み取り
-- **sysfs PWM** (`/sys/class/pwm/pwmchip0/pwm1`) — LED PWM制御（200kHz、pin13 = PWM0_1 → channel 1）
+- **sysfs PWM** (`/sys/class/pwm/pwmchip0/pwm1`) — LED PWM制御（200kHz、pin13 = PWM0_1 → channel 1、UAC2入力レベル連動）
 - **USB Audio Class 2 ガジェット** — dwc2 + configfs (`/sys/kernel/config/usb_gadget/sound-pi/`)
 - **USB HID** — `/dev/hidg0` 経由でConsumer Control送信
 - **bluetoothctl** — Bluetooth制御（subprocess）
@@ -61,9 +61,10 @@ LCD表示
 起動 → VuMeter（デフォルト）
 左上100x100タップ → メインメニュー（3×2タイル: VU/DualVU/Spectrum/Mixer）
 右上100x100タップ → 設定メニュー（3×2タイル: System/BT/WiFi/Develop）
-ロータリー回転 → 選択デバイスの音量変更 + VolumeOverlay（倍率 x1=1%刻み / x5=5%刻み、デバイス未設定時はマスター音量 5%刻み）
-ロータリー短押し → Play/Pause (USB HID)
-ロータリー長押し → 選択デバイスのMute切替（デバイス未設定時はマスターMute）
+ロータリー回転 → 選択デバイスの音量変更（倍率 x1=1%刻み / x5=5%刻み、デバイス未設定時はマスター音量 5%刻み）
+    ※ VolumeOverlay は Mixer 画面以外でのみ表示
+ロータリー短押し（Mixer画面）→ 選択デバイスの Mute/Unmute 切替
+ロータリー短押し（他の画面）→ Mixer 画面へ遷移
 出力デバイスの Play/Pause/Next/Prev → PC へ HID 転送
 出力デバイスの Volume Up/Down → 該当 Mixer スロットの音量調整（倍率に応じた刻み）
 ```
@@ -89,6 +90,7 @@ LCD表示
 - gpioget 出力: `"19"=active` / `"19"=inactive`
 - gpiomon がピンを占有中は gpioget で同じピンを読めない → `pin_states` dict でイベントから追跡
 - **ロータリーエンコーダのソフトウェアデバウンス**: CLK falling edge 間隔 5ms 未満のイベントを無視（`ENCODER_DEBOUNCE_S = 0.005`）。ハードウェアコンデンサと併用
+- **スイッチのデバウンス**: エッジ間隔 50ms 未満を無視（`BUTTON_DEBOUNCE_S = 0.05`）。短押しのみ（長押し判定は廃止）
 - LED hardware PWM: pin13 = PWM0_1 → **channel 1** (`pwm1`)、`dtoverlay=pwm,pin=13,func=4` が必要
 - PWM周波数: **200kHz** (5000ns period) — 1kHz だとオーディオにノイズが乗る
 - PWM export 後の udev 権限待ち: `os.access(period_path, os.W_OK)` のリトライループが必要
