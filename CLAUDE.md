@@ -121,7 +121,8 @@ LCD表示
 
 ### 設定永続化 (config-persistence)
 - 設定ファイル: `~/.config/sound-pi/config.json`
-- overlayFS 環境では `/boot/firmware/config/save.sh --all` で FAT32 パーティションに永続化
+- overlayFS 環境では `sudo /boot/firmware/config/save.sh --all` で FAT32 パーティションに永続化
+- **`save.sh` は sudo 必須** — root 権限がないとマウント操作が失敗する
 - **即時永続化**: デバイス追加/削除時（低頻度の操作）
 - **一括永続化**: アプリ終了時（音量変更等の高頻度操作分をまとめて保存）
 - Ansible: `sound-pi-pygame` ロールで `save.sh` により config ファイルを登録
@@ -149,8 +150,27 @@ LCD表示
 ```
 
 - 4スロット固定、選択中スロットはシアン枠（ロータリーエンコーダのターゲット）
-- 空スロットタップ → ALSA デバイス一覧オーバーレイ → デバイス追加
-- config 保存形式: `output_devices: [{node_name, pw_device_name, volume, muted}, ...]`
+- 空スロットタップ → デバイス一覧オーバーレイ（ALSA + BT）→ デバイス追加
+- config 保存形式: `output_devices: [{node_name, pw_device_name, card_name, nick, volume, muted}, ...]`
+
+## Bluetooth 設定画面 (BluetoothSettingsScreen)
+
+- **BluetoothManager** (`py/managers/bluetooth.py`): `bluetoothctl` ラッパー
+  - エージェント: `NoInputNoOutput`（オーディオデバイスは PIN 不要）
+  - スキャン: `bluetoothctl` を interactive mode で Popen、`scan on` → 15秒 → `scan off`
+  - スキャン中 2秒ごとにデバイスリスト更新
+  - 操作（pair/connect/disconnect/remove）は同期、呼び出し側がスレッドで実行
+  - stub モード: `bluetoothctl` 未検出時は空リスト返却（開発機対応）
+- **画面レイアウト**: Paired セクション（connected 優先）→ Discovered セクション
+  - Scan ボタン: y=104（メニュー領域 y=0〜100 の外に配置）
+  - デバイス名があるものを優先表示（MACアドレスだけのデバイスは後ろ）
+  - ボタン: Connected→"Discon"(RED), Paired→"Connect"(CYAN), Found→"Pair"(BLUE)
+  - Paired + 未接続: 削除ボタン "×"
+  - Pair 成功後は自動 connect
+- **BT デバイスの OUTPUT CONTROL 連携**:
+  - `list_addable_devices()` が `bluez_output.*` の PipeWire sink も返す
+  - BT sink は `is_bluez=True` フラグ付き → Mixer で `ensure_sink_profile` をスキップ
+  - BT sink は PipeWire 接続後に遅れて出現することがある → wpctl_id=None でも offline にせず nick を表示
 
 ## Ansible ロール
 
