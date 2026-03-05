@@ -95,14 +95,17 @@ LCD表示
 - `xserver-xorg-legacy` はインストールしない
 
 ### PipeWire マルチシンク
-- **デバイス候補取得**: `aplay -l` → ALSA playback デバイス一覧（内蔵・HDMI・UAC2 は除外）
+- **デバイス候補取得**: `aplay -l` → ALSA playback デバイス一覧（内蔵・HDMI・UAC2 は除外）+ `pw-cli ls Node` → `bluez_output.*` BT シンク
 - **PipeWire Device マッチ**: `pw-cli ls Device` の `device.nick` == ALSA の long_name（`[]` 内）
 - **プロファイル自動選択**: ACP (ALSA Card Profiles) が USB デバイスごとに適切なプロファイルを生成。`ensure_sink_profile` で Audio/Sink を持つプロファイルを自動選択（analog-stereo 優先、pro-audio はフォールバック）
+- **BT デバイスはプロファイル切替不要**: `bluez_output.*` の node_name をそのまま pw-loopback のターゲットに使う
 - **`wpctl inspect` の UTF-8 問題**: pro-audio プロファイルのノードは `audio.position` に不正な UTF-8 バイトを含む → `decode("utf-8", errors="replace")` が必須
 - **`pw-cli ls Node` の制限**: pro-audio プロファイルのノードは `media.class` が出力されないことがある → Sink 検索には `wpctl status` のパースを使う
 - **per-sink 音量/ミュート**: `wpctl set-volume/set-mute <node_id> <value>` で個別制御
 - **ノード名の変動**: ACP プロファイルにより node_name が変わる（例: `pro-output-0` ↔ `analog-stereo`）。config には `pw_device_name`（安定）も保存し、node_name が見つからない場合はデバイス名からフォールバック解決
+- **`remove_route` のキー不一致対策**: `_loopback_procs` のキーと node_name が一致しない場合（プロファイル切替でノード名変動）、`proc.args` から `-P` ターゲットを検索してマッチ
 - **`start_routing` 2パス方式**: (1) 全ノード名解決＋プロファイル切替 → 1秒待機 → (2) pw-loopback 一斉起動。プロファイル切替直後は PipeWire がシンクを初期化中のため待機が必要
+- **BT sink の `start_routing`**: `bluez_output.*` はプロファイル解決をスキップし、そのまま loopback 起動
 
 ### PipeWire 設定の注意点（重要）
 - **`default.clock.allowed-rates`**: `[ 44100 48000 96000 ]` を設定済み（`10-sound-pi.conf`）。B10Pro は 96kHz 対応

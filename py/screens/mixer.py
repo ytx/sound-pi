@@ -63,6 +63,7 @@ class MixerScreen(Screen):
             if i < len(devices):
                 d = devices[i]
                 self._slots[i].node_name = d.get("node_name")
+                self._slots[i].nick = d.get("nick", "")
                 self._slots[i].volume = d.get("volume", 0.8)
                 self._slots[i].muted = d.get("muted", False)
                 self._slots[i]._pw_device_name = d.get("pw_device_name", "")
@@ -81,29 +82,32 @@ class MixerScreen(Screen):
                 continue
             wpctl_id = self._pw.resolve_node_name(slot.node_name)
             if not wpctl_id and slot._pw_device_name:
-                # Sink missing — find by device name (node_name may have changed)
-                pw_devs = self._pw.list_pw_audio_devices()
-                for d in pw_devs:
-                    if d["device_name"] == slot._pw_device_name:
-                        node_name = self._pw.ensure_sink_profile(d["id"])
-                        if node_name and node_name != slot.node_name:
-                            old = slot.node_name
-                            slot.node_name = node_name
-                            config_changed = True
-                            # Update routing if active
-                            self._pw.remove_route(old)
-                            self._pw.add_route(node_name)
-                            log.info("node_name updated: %s → %s", old, node_name)
-                        wpctl_id = self._pw.resolve_node_name(node_name) if node_name else None
-                        break
+                is_bluez = slot.node_name.startswith("bluez_output.")
+                if not is_bluez:
+                    # ALSA sink missing — find by device name (node_name may have changed)
+                    pw_devs = self._pw.list_pw_audio_devices()
+                    for d in pw_devs:
+                        if d["device_name"] == slot._pw_device_name:
+                            node_name = self._pw.ensure_sink_profile(d["id"])
+                            if node_name and node_name != slot.node_name:
+                                old = slot.node_name
+                                slot.node_name = node_name
+                                config_changed = True
+                                # Update routing if active
+                                self._pw.remove_route(old)
+                                self._pw.add_route(node_name)
+                                log.info("node_name updated: %s → %s", old, node_name)
+                            wpctl_id = self._pw.resolve_node_name(node_name) if node_name else None
+                            break
+                # BT sinks may appear late — leave wpctl_id as None for now
             slot.wpctl_id = wpctl_id
             if wpctl_id:
                 for s in self._pw._sinks_cache:
                     if s["node_name"] == slot.node_name:
                         slot.nick = s.get("nick") or s.get("description", "")[:10]
                         break
-            else:
-                slot.nick = "(offline)"
+            elif not slot.nick:
+                slot.nick = slot._card_name[:10] if slot._card_name else "(offline)"
         if config_changed:
             self.save_config()
             persist_config()
@@ -117,6 +121,7 @@ class MixerScreen(Screen):
                     "node_name": slot.node_name,
                     "pw_device_name": slot._pw_device_name,
                     "card_name": slot._card_name,
+                    "nick": slot.nick,
                     "volume": round(slot.volume, 2),
                     "muted": slot.muted,
                 })
