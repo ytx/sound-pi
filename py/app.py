@@ -14,6 +14,7 @@ import config
 from display import Display
 from touch import Touch, TOUCH_DOWN, TOUCH_UP, TOUCH_MOVE
 from managers.audio import AudioCapture, PipeWireManager
+from managers.bluetooth import BluetoothManager
 from managers.gpio import (GpioManager, EVT_ROTATE_CW, EVT_ROTATE_CCW,
                            EVT_BUTTON_SHORT, EVT_BUTTON_LONG)
 from managers.hid import HidController
@@ -69,6 +70,7 @@ class App:
         self._pipewire = PipeWireManager()
         self._gpio = GpioManager()
         self._hid = HidController()
+        self._bluetooth = BluetoothManager()
 
         # Config
         config.load()
@@ -96,7 +98,7 @@ class App:
             DualVuMeterScreen(self._audio_capture),
             SpectrumScreen(self._audio_capture),
             MixerScreen(self._pipewire),
-            BluetoothSettingsScreen(),
+            BluetoothSettingsScreen(self._bluetooth),
             WifiSettingsScreen(),
             SystemScreen(),
             DevelopScreen(self._audio_capture, self._gpio),
@@ -127,6 +129,7 @@ class App:
         self._audio_capture.start()
         self._pipewire.start_routing()
         self._gpio.start()
+        self._bluetooth.start()
         self._screens[self._current_screen_id].on_enter()
 
         try:
@@ -258,6 +261,7 @@ class App:
         self._audio_capture.stop()
         self._pipewire.stop_routing()
         self._gpio.stop()
+        self._bluetooth.stop()
         self._hid.close()
         self._touch.close()
         self._display.close()

@@ -54,7 +54,7 @@ def persist():
         return
     try:
         subprocess.run(
-            [str(_SAVE_SH), "--all"],
+            ["sudo", str(_SAVE_SH), "--all"],
             timeout=10, check=False,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )

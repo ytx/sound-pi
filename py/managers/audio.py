@@ -334,10 +334,11 @@ class PipeWireManager:
         }
 
     def list_addable_devices(self) -> list[dict]:
-        """Return ALSA playback devices available to add as output.
-        Merges aplay info with PipeWire device ID.
+        """Return playback devices available to add as output.
+        Includes ALSA (USB) and Bluetooth sinks.
         Returns: [{"card_name": "B10Pro", "long_name": "B10Pro",
-                   "pw_device_id": 48, "pw_device_name": "alsa_card.usb-..."}]
+                   "pw_device_id": 48, "pw_device_name": "alsa_card.usb-...",
+                   "is_bluez": False}]
         """
         alsa = self.list_alsa_playback_devices()
         pw_devs = self.list_pw_audio_devices()
@@ -358,7 +359,24 @@ class PipeWireManager:
                 "long_name": a["long_name"],
                 "pw_device_id": pw["id"],
                 "pw_device_name": pw["device_name"],
+                "is_bluez": False,
             })
+
+        # Add Bluetooth sinks (bluez_output.* in PipeWire)
+        self.list_sinks()
+        for s in self._sinks_cache:
+            node_name = s.get("node_name", "")
+            if not node_name.startswith("bluez_output."):
+                continue
+            display = s.get("description") or s.get("nick") or node_name
+            result.append({
+                "card_name": node_name,
+                "long_name": display,
+                "pw_device_id": s.get("id"),
+                "pw_device_name": node_name,
+                "is_bluez": True,
+            })
+
         return result
 
     def ensure_sink_profile(self, pw_device_id: int, pw_device_name: str = "") -> str | None:
@@ -634,6 +652,10 @@ class PipeWireManager:
             for d in devices:
                 node_name = d.get("node_name", "")
                 pw_device_name = d.get("pw_device_name", "")
+                # BT sinks (bluez_output.*) don't need resolution
+                if node_name.startswith("bluez_output."):
+                    resolved_targets.append(node_name)
+                    continue
                 # Verify node exists; if not, resolve via device
                 resolved = self.resolve_node_name(node_name)
                 if not resolved and pw_device_name:
@@ -703,7 +725,18 @@ class PipeWireManager:
 
     def remove_route(self, node_name: str):
         """Stop routing to a single sink."""
-        self._stop_loopback(node_name)
+        if node_name in self._loopback_procs:
+            self._stop_loopback(node_name)
+            return
+        # Key mismatch (e.g. profile changed node_name) — find by -P target in proc.args
+        for key, proc in list(self._loopback_procs.items()):
+            try:
+                if node_name in (proc.args or []):
+                    self._stop_loopback(key)
+                    return
+            except Exception:
+                pass
+        log.warning("remove_route: no loopback found for %s", node_name)
 
     def _stop_loopback(self, key: str):
         proc = self._loopback_procs.pop(key, None)

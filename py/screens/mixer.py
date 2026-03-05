@@ -22,11 +22,11 @@ SLOT_X_GAP = 110  # 10 + 100
 HEADER_Y = 16
 NICK_Y = 46
 SLIDER_Y = 68
-SLIDER_H = 180
+SLIDER_H = 150
 SLIDER_W = 40
-PERCENT_Y = 254
-MUTE_Y = 276
-REMOVE_Y = 300
+PERCENT_Y = 224
+MUTE_Y = 246
+REMOVE_Y = 272
 # Add-device overlay
 OVERLAY_X = 40
 OVERLAY_Y = 40
@@ -313,12 +313,17 @@ class MixerScreen(Screen):
         pw_device_id = dev["pw_device_id"]
         pw_device_name = dev["pw_device_name"]
         nick = dev["long_name"]
+        is_bluez = dev.get("is_bluez", False)
 
-        # Ensure the device has an Audio/Sink (switch profile if needed)
-        node_name = self._pw.ensure_sink_profile(pw_device_id)
-        if not node_name:
-            log.warning("failed to get sink for device %s", nick)
-            return
+        if is_bluez:
+            # BT sinks are already active — use pw_device_name as node_name
+            node_name = pw_device_name
+        else:
+            # Ensure the device has an Audio/Sink (switch profile if needed)
+            node_name = self._pw.ensure_sink_profile(pw_device_id)
+            if not node_name:
+                log.warning("failed to get sink for device %s", nick)
+                return
 
         # Resolve wpctl ID
         wpctl_id = self._pw.resolve_node_name(node_name)
