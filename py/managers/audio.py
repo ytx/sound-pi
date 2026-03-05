@@ -673,6 +673,14 @@ class PipeWireManager:
             # Pass 2: start all loopbacks
             for node_name in resolved_targets:
                 self._start_loopback(source, node_name, node_name)
+            # Pass 3: apply saved volume/mute to each sink
+            time.sleep(0.5)
+            for d in devices:
+                node_name = d.get("node_name", "")
+                wpctl_id = self.resolve_node_name(node_name)
+                if wpctl_id:
+                    self.set_sink_volume(wpctl_id, d.get("volume", 0.8))
+                    self.set_sink_mute(wpctl_id, d.get("muted", False))
             if config_changed:
                 cfg.set("output_devices", devices)
             return
