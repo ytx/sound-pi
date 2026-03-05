@@ -671,16 +671,14 @@ class PipeWireManager:
                 cfg.set("output_devices", devices)
             # Allow PipeWire to stabilize after profile switches
             time.sleep(1)
-            # Pass 2: start loopbacks and apply volume/mute immediately
+            # Pass 2: start loopbacks with initial volume via playback-props
             dev_by_name = {d.get("node_name", ""): d for d in devices}
             for node_name in resolved_targets:
-                self._start_loopback(source, node_name, node_name)
                 d = dev_by_name.get(node_name, {})
-                self._apply_sink_volume(
-                    node_name,
-                    d.get("volume", 0.8),
-                    d.get("muted", False),
-                )
+                vol = d.get("volume", 0.8)
+                muted = d.get("muted", False)
+                self._start_loopback(source, node_name, node_name,
+                                     volume=vol, muted=muted)
             if config_changed:
                 cfg.set("output_devices", devices)
             return
@@ -696,15 +694,19 @@ class PipeWireManager:
                 return self.ensure_sink_profile(d["id"], pw_device_name)
         return None
 
-    def _start_loopback(self, source: str, sink: str | None, key: str):
+    def _start_loopback(self, source: str, sink: str | None, key: str,
+                        volume: float = 1.0, muted: bool = False):
         """Start a single pw-loopback process."""
         if key in self._loopback_procs:
             return
+        vol = max(0.0, min(1.0, volume))
+        mute_str = "true" if muted else "false"
         cmd = [
             "pw-loopback",
             "-C", source,
             "--channels", "2",
             "--latency", "50",
+            "--playback-props", f"{{ volume={vol:.2f} mute={mute_str} }}",
         ]
         if sink:
             cmd += ["-P", sink]
@@ -718,25 +720,6 @@ class PipeWireManager:
         except Exception as e:
             log.warning("loopback start failed (%s): %s", sink or "default", e)
 
-    def _apply_sink_volume(self, node_name: str, volume: float, muted: bool,
-                           retries: int = 5, delay: float = 0.2):
-        """Apply volume/mute to a sink, retrying until wpctl_id is available.
-
-        pw-loopback takes a moment to register the sink node, so we retry
-        a few times with a short delay.
-        """
-        for i in range(retries):
-            wpctl_id = self.resolve_node_name(node_name)
-            if wpctl_id:
-                self.set_sink_volume(wpctl_id, volume)
-                self.set_sink_mute(wpctl_id, muted)
-                log.info("sink volume applied: %s (id=%d) vol=%.2f muted=%s",
-                         node_name, wpctl_id, volume, muted)
-                return
-            time.sleep(delay)
-        log.warning("sink volume: could not resolve %s after %d retries",
-                    node_name, retries)
-
     def add_route(self, node_name: str, card_name: str = "",
                   pw_device_name: str = "",
                   volume: float = 0.8, muted: bool = False) -> bool:
@@ -748,9 +731,8 @@ class PipeWireManager:
         # Remove default loopback if present
         if "__default__" in self._loopback_procs:
             self._stop_loopback("__default__")
-        self._start_loopback(source, node_name, node_name)
-        if node_name in self._loopback_procs:
-            self._apply_sink_volume(node_name, volume, muted)
+        self._start_loopback(source, node_name, node_name,
+                             volume=volume, muted=muted)
         return node_name in self._loopback_procs
 
     def remove_route(self, node_name: str):

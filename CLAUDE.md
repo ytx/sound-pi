@@ -146,9 +146,9 @@ LCD表示
 - overlay FS 環境でも Ansible デプロイ中に WirePlumber が動作していると stale なエントリが残る
 
 ### pw-loopback 音量バースト防止
-- **問題**: `pw-loopback` 起動直後は PipeWire デフォルト (100%) で音が流れ、その後の `set_sink_volume` まで最大音量になる
-- **対策**: `_apply_sink_volume()` で loopback 起動直後に即座に音量設定。wpctl_id が resolve されるまで 200ms 間隔で最大5回リトライ
-- `start_routing()` / `add_route()` 両方で loopback 起動と音量設定をセットで実行
+- **問題**: `pw-loopback` 起動直後は PipeWire デフォルト (100%) で音が流れ、`wpctl set-volume` が間に合わないと最大音量が一瞬流れる
+- **対策**: `pw-loopback --playback-props "{ volume=0.50 mute=false }"` でノード生成時に初期音量を設定。wpctl でのリトライ待ちが不要
+- `_start_loopback()` に `volume` / `muted` パラメータを追加、`start_routing()` / `add_route()` から渡す
 
 ### 設定永続化 (config-persistence)
 - 設定ファイル: `~/.config/sound-pi/config.json`
