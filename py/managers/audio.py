@@ -557,11 +557,12 @@ class PipeWireManager:
                 key = key.strip().strip("*").strip()
                 val = val.strip().strip('"')
                 props[key] = val
-        media_class = props.get("media.class", "")
-        if media_class != "Audio/Sink":
-            return None
         node_name = props.get("node.name", "")
         if not node_name:
+            return None
+        media_class = props.get("media.class", "")
+        # BT sinks may not have media.class in pw-cli ls Node output
+        if media_class != "Audio/Sink" and not node_name.startswith("bluez_output."):
             return None
         return {
             "id": node_id,
