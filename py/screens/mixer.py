@@ -71,7 +71,14 @@ class MixerScreen(Screen):
         self._confirm_remove_timer: float = 0
 
     def on_enter(self):
-        """Load config and resolve wpctl IDs."""
+        self.load_slots()
+
+    def load_slots(self):
+        """Load the output devices from config and resolve their wpctl IDs.
+
+        Called at startup as well, so media keys from a device reach its
+        slot before the Mixer screen has ever been shown.
+        """
         devices = cfg.get("output_devices", [])
         for i in range(MAX_SLOTS):
             if i < len(devices):
@@ -107,6 +114,10 @@ class MixerScreen(Screen):
         if self._poll_timer > 0:
             return
         self._poll_timer = self.POLL_INTERVAL
+        self._poll_sinks()
+
+    def poll_sinks(self):
+        """Resolve sinks now, outside the screen's own polling."""
         self._poll_sinks()
 
     def _poll_sinks(self):

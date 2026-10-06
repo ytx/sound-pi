@@ -82,6 +82,9 @@ class App:
         # Screens
         self._screens: dict = {}
         self._register_screens()
+        # The mixer's slots are needed from the start: a device's media
+        # keys are matched against them whatever screen is showing.
+        self._screens["mixer"].load_slots()
         self._current_screen_id = config.get("last_screen", "vu_meter")
         if self._current_screen_id not in self._screens:
             self._current_screen_id = "vu_meter"
@@ -261,6 +264,9 @@ class App:
                 self._hid.prev_track()
             elif event_name in ("volume_up", "volume_down"):
                 slot = self._find_slot_for_device(mixer, device)
+                if slot and not slot.wpctl_id:
+                    # The sink may have appeared since the Mixer screen last polled.
+                    mixer.poll_sinks()
                 if slot and slot.wpctl_id:
                     step = slot.volume_step  # 1 or 5
                     delta = (step / 100.0) if event_name == "volume_up" else -(step / 100.0)
